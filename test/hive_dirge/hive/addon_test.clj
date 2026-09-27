@@ -111,6 +111,25 @@
     ((hive-command a) {:argv ["kanban"]})
     (is (= "# not json" (:markdown (some (fn [[k op]] (when (= k :panel) op)) @calls))))))
 
+(deftest swarm-command-lists-all-agents
+  (let [calls (atom [])
+        ports (assoc (stub-ports calls {"swarm" (text-answer "AGENTS")})
+                     :json-parse (fn [_] {:agents [{:id "l1" :status "working" :project-id "p"}]}))
+        a     (started ports {:addon/config {:hive/server "hv"}})
+        reply ((hive-command a) {:argv ["swarm"] :cwd "/w/proj"})
+        panel (some (fn [[k op]] (when (= k :panel) op)) @calls)]
+    (is (= [:mcp "hv" "swarm" {"command" "agent status" "agent_id" "coordinator"}] (first @calls)))
+    (is (= "hive swarm: 1 agents, 1 working (side panel)" (:text reply)))
+    (is (= "hive-swarm" (:id panel)))
+    (is (= ["l1  working  p"] (map :text (:lines panel))))))
+
+(deftest swarm-command-honours-configured-scope
+  (let [calls (atom [])
+        a     (started (stub-ports calls {"swarm" (text-answer "x")})
+                       {:addon/config {:hive/swarm-scope :project}})]
+    ((hive-command a) {:argv ["swarm"] :cwd "/w/proj"})
+    (is (= "proj" (get-in (first @calls) [3 "project_id"])))))
+
 (deftest help-and-unknown
   (let [calls (atom [])
         a     (started (stub-ports calls {}) {})]

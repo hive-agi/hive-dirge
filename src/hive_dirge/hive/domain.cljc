@@ -13,11 +13,23 @@
   {:hive/server            "hive"
    :hive/kanban-limit      50
    :hive/max-prompt-chars  60000
-   :hive/memory-limit      10})
+   :hive/memory-limit      10
+   :hive/swarm-scope       :all})
 
 (defn- positive-int?
   [x]
   (and (integer? x) (pos? x)))
+
+(defn resolve-swarm-scope
+  "The swarm listing scope out of a configured value: :all (every agent),
+   :project (agents of the current project) or a project id string. Keywords
+   and their string names are both accepted; anything else is :all."
+  [v]
+  (cond
+    (#{:all "all"} v)         :all
+    (#{:project "project"} v) :project
+    (and (string? v) (not (str/blank? v))) v
+    :else (:hive/swarm-scope default-config)))
 
 (defn resolve-config
   "Effective configuration from what a host hands the addon. Accepts the
@@ -35,7 +47,8 @@
      :hive/max-prompt-chars (let [n (:hive/max-prompt-chars cfg)]
                               (if (positive-int? n) n (:hive/max-prompt-chars default-config)))
      :hive/memory-limit     (let [n (:hive/memory-limit cfg)]
-                              (if (positive-int? n) n (:hive/memory-limit default-config)))}))
+                              (if (positive-int? n) n (:hive/memory-limit default-config)))
+     :hive/swarm-scope      (resolve-swarm-scope (:hive/swarm-scope cfg))}))
 
 ;; ---------------------------------------------------------------------------
 ;; /hive command parsing
@@ -48,7 +61,8 @@
   "Help text for the /hive command family."
   (str "/hive catchup          load hive session context (memory, kanban, git) into the next turn\n"
        "/hive wrap             record a hive session wrap for this project\n"
-       "/hive kanban [status]  show the project kanban in a side panel (status: todo, inprogress, inreview, done)"))
+       "/hive kanban [status]  show the project kanban in a side panel (status: todo, inprogress, inreview, done)\n"
+       "/hive swarm [scope]    show hive agents in a side panel (scope: all, project, or a project id)"))
 
 (defn- words
   [s]
@@ -75,10 +89,20 @@
                     (contains? kanban-statuses status) {:action :kanban :status status}
                     :else {:action :unknown
                            :reason (str "unknown kanban status: " status)}))
+      "swarm"   (if-let [scope (first more)]
+                  {:action :swarm :scope (resolve-swarm-scope scope)}
+                  {:action :swarm})
       {:action :unknown :reason (str "unknown /hive subcommand: " sub)})))
 
 ;; ---------------------------------------------------------------------------
 ;; Requests: [server tool args] triples for dirge.harness/mcp-call
+
+(defn project-hint
+  "The last path segment of `directory`, which is how hive names a project
+   by default."
+  [directory]
+  (when (string? directory)
+    (last (remove str/blank? (str/split directory #"/")))))
 
 (defn- with-directory
   [args directory]
@@ -122,6 +146,32 @@
                                           (:hive/memory-limit config))}
                directory)
        (and (string? type) (not (str/blank? type))) (assoc "type" type))]))
+
+(def swarm-all-agent-id
+  "agent_id that makes hive's agent status list the whole registry instead
+   of the caller's own row (a caller id is otherwise injected per session)."
+  "coordinator")
+
+(defn swarm-project
+  "The project id a swarm `scope` narrows to in `directory`, or nil for
+   :all."
+  [scope directory]
+  (cond
+    (= :all scope)     nil
+    (= :project scope) (project-hint directory)
+    (string? scope)    scope
+    :else nil))
+
+(defn swarm-request
+  "mcp-call triple for hive's agent status listing under `scope` (nil means
+   the configured :hive/swarm-scope). project_id is sent only when the
+   scope narrows to a project: any project_id, even the session's own,
+   filters the registry by it."
+  [config directory scope]
+  (let [project (swarm-project (or scope (:hive/swarm-scope config)) directory)]
+    [(:hive/server config) "swarm"
+     (cond-> {"command" "agent status" "agent_id" swarm-all-agent-id}
+       project (assoc "project_id" project))]))
 
 ;; ---------------------------------------------------------------------------
 ;; MCP result shaping
@@ -187,13 +237,6 @@
                              [:tasks :items :results])
     :else nil))
 
-(defn project-hint
-  "The last path segment of `directory`, which is how hive names a project
-   by default."
-  [directory]
-  (when (string? directory)
-    (last (remove str/blank? (str/split directory #"/")))))
-
 (defn local-first
   "`rows` with the ones belonging to `project` first, order otherwise kept."
   [rows project]
@@ -238,6 +281,69 @@
            " (side panel)"))))
 
 ;; ---------------------------------------------------------------------------
+;; Swarm agents -> side panel
+
+(defn swarm-rows
+  "Agent rows out of a parsed agent status answer: {:agents [...]}, a single
+   {:agent {...}} or a bare vector. Anything else is nil."
+  [data]
+  (cond
+    (sequential? data)              (vec (filter map? data))
+    (sequential? (:agents data))    (vec (filter map? (:agents data)))
+    (map? (:agent data))            [(:agent data)]
+    :else nil))
+
+(defn- agent-project
+  [row]
+  (or (:project-id row) (:project_id row) (:project row)))
+
+(defn- status-face
+  [status]
+  (case (str status)
+    "working" "normal"
+    "idle"    "dim"
+    "blocked" "warn"
+    "error"   "warn"
+    "normal"))
+
+(defn swarm-line
+  "One panel line for an agent row: id, status, project."
+  [row]
+  {:text (str (or (:id row) "?") "  " (or (:status row) "?") "  "
+              (or (agent-project row) "-"))
+   :face (status-face (:status row))})
+
+(defn swarm-title
+  [scope]
+  (str "hive swarm"
+       (cond
+         (= :all scope)     " (all)"
+         (= :project scope) " (project)"
+         (string? scope)    (str " (" scope ")")
+         :else "")))
+
+(defn swarm-panel
+  "A dirge panel :show op listing agent `rows`. With nil rows (unparsable
+   answer) the raw `text` is shown as markdown."
+  [rows text scope]
+  (if (nil? rows)
+    {:op :show :id "hive-swarm" :title (swarm-title scope) :markdown text}
+    {:op :show :id "hive-swarm" :title (swarm-title scope)
+     :lines (if (seq rows)
+              (mapv swarm-line rows)
+              [{:text "no agents" :face "dim"}])}))
+
+(defn swarm-summary
+  "The chat line after the swarm panel is shown."
+  [rows]
+  (if (nil? rows)
+    "hive swarm shown in the side panel"
+    (let [working (count (filter #(= "working" (:status %)) rows))]
+      (str "hive swarm: " (count rows) " agents"
+           (when (pos? working) (str ", " working " working"))
+           " (side panel)"))))
+
+;; ---------------------------------------------------------------------------
 ;; Addon tool answers and the system prompt
 
 (defn tool-answer
@@ -254,6 +360,7 @@
   (str "The hive.dirge addon connects this session to hive (MCP server \""
        (:hive/server config) "\"). The user can run /hive catchup (load hive "
        "memory and kanban context), /hive wrap (record a session wrap) and "
-       "/hive kanban [status] (show tasks in the side panel). You can call the "
+       "/hive kanban [status] (show tasks in the side panel) and /hive swarm "
+       "[scope] (show hive agents in the side panel). You can call the "
        "hive_memory_search and hive_kanban_list tools to consult hive memory "
        "and the project kanban."))

@@ -1,7 +1,7 @@
 (ns hive-dirge.hive.addon
   "hive.dirge: the in-dirge IAddon that connects a dirge session to hive over
    dirge's own MCP connection. Contributes the /hive command family
-   (catchup, wrap, kanban), two tools proxying hive memory search and the
+   (catchup, wrap, kanban, swarm), two tools proxying hive memory search and the
    kanban list, and a static system-prompt hook.
 
    Effects go through a ports map {:mcp-call :json-parse :panel! :cwd} so the
@@ -43,11 +43,23 @@
         ((:panel! ports) (d/kanban-panel rows text project status))
         {:text (d/kanban-summary rows project)}))))
 
+(defn- swarm!
+  [ports config ctx scope]
+  (let [dir    (directory ports ctx)
+        scope  (or scope (:hive/swarm-scope config))
+        answer (call! ports (d/swarm-request config dir scope))]
+    (if-let [err (d/result-error answer)]
+      {:text (str "/hive swarm failed: " err)}
+      (let [text (d/result-text answer)
+            rows (d/swarm-rows ((:json-parse ports) text))]
+        ((:panel! ports) (d/swarm-panel rows text scope))
+        {:text (d/swarm-summary rows)}))))
+
 (defn run-command
   "Handles one /hive invocation against `ports`. Answers a dirge command
    reply {:text ..} or {:text .. :prompt ..}."
   [ports config ctx]
-  (let [{:keys [action status reason]} (d/parse-command ctx)]
+  (let [{:keys [action status scope reason]} (d/parse-command ctx)]
     (case action
       :help    {:text d/usage}
       :unknown {:text (str reason "\n" d/usage)}
@@ -55,7 +67,8 @@
                                 (call! ports (d/catchup-request config (directory ports ctx))))
       :wrap    (d/command-reply config :wrap
                                 (call! ports (d/wrap-request config (directory ports ctx))))
-      :kanban  (kanban! ports config ctx status))))
+      :kanban  (kanban! ports config ctx status)
+      :swarm   (swarm! ports config ctx scope))))
 
 ;; ---------------------------------------------------------------------------
 ;; Tools
@@ -112,7 +125,7 @@
   (excluded-tools [_] #{})
   (hooks [_]
     {:dirge/system-prompt (fn [_] (d/system-prompt (current-config state)))
-     :dirge/commands      {"hive" {:description "hive: catchup | wrap | kanban [status]"
+     :dirge/commands      {"hive" {:description "hive: catchup | wrap | kanban [status] | swarm [scope]"
                                    :handler     (fn [ctx]
                                                   (run-command ports (current-config state) ctx))}}}))
 
