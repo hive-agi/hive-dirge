@@ -1,0 +1,6 @@
+JIT specialization stats:
+  Boxed arith calls:    137236
+  Guard deopts:         0
+  Keyword IC fills:     0
+  Protocol IC hits:     33021
+  Protocol IC misses:   8

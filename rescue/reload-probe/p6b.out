@@ -1,0 +1,59 @@
+== warming
+[2m2026-09-27T00:48:42.781387Z[0m [34mDEBUG[0m [2mir[0m[2m:[0m background lower published arity_id=264 (Some("hot"))
+[2m2026-09-27T00:48:42.781462Z[0m [34mDEBUG[0m [2mir[0m[2m:[0m background lower published arity_id=268 (Some("one"))
+[2m2026-09-27T00:48:42.781486Z[0m [34mDEBUG[0m [2mir[0m[2m:[0m background lower published arity_id=269 (Some("via-proto"))
+[2m2026-09-27T00:48:42.814796Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m enqueue arity_id=264 (count=1000)
+[2m2026-09-27T00:48:42.814874Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m compiling arity_id=264 specs=[Long]
+[2m2026-09-27T00:48:42.818428Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m compiled  arity_id=264 epoch=1 fn_ptr=0x701fbc01f000
+[2m2026-09-27T00:48:42.848995Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m enqueue arity_id=268 (count=1000)
+[2m2026-09-27T00:48:42.849055Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m compiling arity_id=268 specs=[]
+[2m2026-09-27T00:48:42.849939Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m compiled  arity_id=268 epoch=2 fn_ptr=0x701fbc039000
+[2m2026-09-27T00:48:42.850017Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m enqueue arity_id=269 (count=1000)
+[2m2026-09-27T00:48:42.851153Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m compiling arity_id=269 specs=[]
+[2m2026-09-27T00:48:42.852016Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m compiled  arity_id=269 epoch=3 fn_ptr=0x701fbc04d000
+[2m2026-09-27T00:48:42.968960Z[0m [34mDEBUG[0m [2mir[0m[2m:[0m background lower published arity_id=270 (Some("driver"))
+[2m2026-09-27T00:48:43.099659Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m enqueue arity_id=270 (count=1000)
+[2m2026-09-27T00:48:43.100153Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m compiling arity_id=270 specs=[Long]
+[2m2026-09-27T00:48:43.102486Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m compiled  arity_id=270 epoch=4 fn_ptr=0x701fbc06c000
+-- v1 (hot k=1, pm k=10)
+  (one) => 1
+  (via-proto) [protocol call from hot fn] => 10
+  (driver 10) => 110
+  loop 3000x (one)+(via-proto) => 33000
+== load-file h2 (hot k=100, and defprotocol P RE-EVALUATED)
+[2m2026-09-27T00:48:43.285211Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m mark stale epoch=1 arity_id=264 (376 bytes)
+[2m2026-09-27T00:48:43.285262Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m mark stale epoch=2 arity_id=268 (258 bytes)
+[2m2026-09-27T00:48:43.285269Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m mark stale epoch=4 arity_id=270 (1504 bytes)
+-- after h2 reload (protocol re-evaluated -> record R orphaned?)
+[2m2026-09-27T00:48:43.285996Z[0m [34mDEBUG[0m [2mir[0m[2m:[0m background lower published arity_id=268 (Some("one"))
+  (one) => 100
+  (via-proto) [protocol call from hot fn] => nil
+[2m2026-09-27T00:48:43.286383Z[0m [34mDEBUG[0m [2mir[0m[2m:[0m background lower published arity_id=270 (Some("driver"))
+  (driver 10) => THREW runtime error: No implementation of protocol P for type R
+  loop 3000x (one)+(via-proto) => THREW wrong type: expected number, got nil
+== load-file rec2 (pm k=1000)
+-- after rec2 reload (old instance r, new bodies?)
+  (one) => 100
+  (via-proto) [protocol call from hot fn] => 1000
+  (driver 10) => 11000
+[2m2026-09-27T00:48:43.288716Z[0m [34mDEBUG[0m [2mir[0m[2m:[0m background lower published arity_id=277 (Some("hot"))
+[2m2026-09-27T00:48:43.303320Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m enqueue arity_id=268 (count=1000)
+[2m2026-09-27T00:48:43.303985Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m enqueue arity_id=277 (count=1000)
+[2m2026-09-27T00:48:43.304157Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m compiling arity_id=268 specs=[]
+[2m2026-09-27T00:48:43.304979Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m compiled  arity_id=268 epoch=5 fn_ptr=0x701fbc097000
+[2m2026-09-27T00:48:43.305001Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m compiling arity_id=277 specs=[Long]
+[2m2026-09-27T00:48:43.305773Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m compiled  arity_id=277 epoch=6 fn_ptr=0x701fbc09f000
+  loop 3000x (one)+(via-proto) => 3300000
+[2m2026-09-27T00:48:43.574192Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m enqueue arity_id=270 (count=1000)
+[2m2026-09-27T00:48:43.575155Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m compiling arity_id=270 specs=[Long]
+[2m2026-09-27T00:48:43.576411Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m compiled  arity_id=270 epoch=7 fn_ptr=0x701fbc0b5000
+== load-file rec2 again after re-warm (pm k=7)
+-- after rec2 reload #2
+  (one) => 100
+  (via-proto) [protocol call from hot fn] => 7
+  (driver 10) => 1070
+  loop 3000x (one)+(via-proto) => 321000
+[2m2026-09-27T00:48:43.663737Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m mark stale epoch=5 arity_id=268 (258 bytes)
+[2m2026-09-27T00:48:43.663754Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m mark stale epoch=7 arity_id=270 (1504 bytes)
+[2m2026-09-27T00:48:43.663756Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m mark stale epoch=3 arity_id=269 (298 bytes)
+[2m2026-09-27T00:48:43.663759Z[0m [34mDEBUG[0m [2mjit[0m[2m:[0m mark stale epoch=6 arity_id=277 (376 bytes)

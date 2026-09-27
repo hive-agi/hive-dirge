@@ -1,0 +1,21 @@
+(ns p6c-jit-err)
+;; PROBE 6c: is the JIT "nil instead of No implementation" reload-specific?
+(defn show [label thunk]
+  (println (str "  " label " => "
+                (try (pr-str (thunk))
+                     (catch #?(:clj Exception :default :default) e (str "THREW " (ex-message e)))))))
+(defprotocol P (pm [this]))
+(defrecord R [] P (pm [_] 1))
+(defrecord S [])
+(defn vp [x] (pm x))
+(defn thrower [x] (if (= x :boom) (throw (ex-info "boom" {})) x))
+(defn vt [x] (thrower x))
+(show "cold: (vp (->S))" #(vp (->S)))
+(show "cold: (vt :boom)" #(vt :boom))
+(dotimes [_ 5000] (vp (->R)) (vt :ok))
+(show "hot (after 5000 R calls): (vp (->R))" #(vp (->R)))
+(show "hot: (vp (->S)) [S never implemented P]" #(vp (->S)))
+(show "hot: (vp {})" #(vp {}))
+(show "hot: (vp 42)" #(vp 42))
+(show "hot: (vt :boom)" #(vt :boom))
+(show "direct (pm (->S))" #(pm (->S)))

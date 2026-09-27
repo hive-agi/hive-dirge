@@ -1,0 +1,7 @@
+(ns user)
+(spit "src/demo/rn.cljc" "(ns demo.rn)\n(defn v [] 1)\n")
+(require 'demo.rn)
+(println "rn first:" (demo.rn/v))
+(spit "src/demo/rn.cljc" "(ns demo.rn)\n(defn v [] 2)\n")
+(remove-ns 'demo.rn)
+(println "after remove-ns + require:" (try (require 'demo.rn) (demo.rn/v) (catch Exception e (str "ERR " e))))

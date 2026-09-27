@@ -1,0 +1,15 @@
+(ns probe.addon (:require [hive-addon.protocol :as p]))
+(println "  [loading probe.addon v4]")
+(defrecord Addon [state extra]
+  p/IAddon
+  (addon-id [_] "probe.addon")
+  (addon-type [_] :native)
+  (capabilities [_] #{:tools})
+  (initialize! [this cfg] (swap! state assoc :init :v4) {:success? true :tag :v4})
+  (shutdown! [_] (swap! state assoc :shutdown :v4) nil)
+  (tools [_] [{:name "t" :handler (fn [params] [:v4 params])}])
+  (schema-extensions [_] [])
+  (health [this] {:status :ok :tag :v4 :extra (:extra this)})
+  (excluded-tools [_] #{})
+  (hooks [_] {}))
+(defn make [] (map->Addon {:state (atom {}) :extra :x}))
