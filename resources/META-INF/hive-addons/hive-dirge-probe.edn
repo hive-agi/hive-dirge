@@ -9,4 +9,4 @@
  :addon/dependencies #{}
  :addon/description  "Probe IAddon for the dirge integration: portable .cljc that loads under clojurust (cljrs) and JVM Clojure."
  :addon/maturity :experimental
- :addon/trust-class :proprietary}
+ :addon/trust-class :foss}

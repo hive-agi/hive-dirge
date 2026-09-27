@@ -11,4 +11,4 @@
  :addon/dependencies #{"hive.olympus" "hive.dirge.host"}
  :addon/description  "Olympus in dirge: the hive.olympus grid delivered as dirge external panels, through hive.dirge.host's :vessel/dispatch!"
  :addon/maturity     :experimental
- :addon/trust-class  :proprietary}
+ :addon/trust-class  :foss}

@@ -237,7 +237,7 @@
         o (manifest "hive-olympus-dirge.edn")]
     (is (= "hive.dirge.host" (:addon/id h)))
     (is (= "hive-dirge.host" (:addon/init-ns h)))
-    (is (= :proprietary (:addon/trust-class h)))
+    (is (= :foss (:addon/trust-class h)))
     (is (= "hive-olympus.harness" (:addon/init-ns o)))
     (is (= "hive.dirge.host" (get-in o [:addon/config :olympus/host])))
     (is (= #{"hive.olympus" "hive.dirge.host"} (:addon/dependencies o)))

@@ -12,4 +12,4 @@
  :addon/requires-capabilities #{:olympus}
  :addon/description  "dirge vessel: serves hive-vessel :json natives to dirge over a loopback, token-gated SSE bridge (discovery file $XDG_RUNTIME_DIR/hive-vessel/dirge.json) and routes dirge key replies to hive.olympus"
  :addon/maturity     :experimental
- :addon/trust-class  :proprietary}
+ :addon/trust-class  :foss}

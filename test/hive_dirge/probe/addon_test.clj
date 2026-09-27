@@ -23,7 +23,7 @@
       (is (= "hive.dirge.probe" (:addon/id m)))
       (is (= "hive-dirge.probe.addon" (:addon/init-ns m)))
       (is (= "addon-ctor" (:addon/init-fn m)))
-      (is (= :proprietary (:addon/trust-class m))))))
+      (is (= :foss (:addon/trust-class m))))))
 
 (deftest manifest-is-discovered-on-classpath
   (let [{:keys [specs]} (boundary/discover-specs)]
