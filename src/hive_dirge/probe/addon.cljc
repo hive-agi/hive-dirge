@@ -10,7 +10,8 @@
    Addon: cljrs keys protocol impls by the UNQUALIFIED record name, so two
    addons that each define `Addon` in different namespaces would clobber one
    another's IAddon impl there."
-  (:require [hive-addon.protocol :as p]))
+  (:require [hive-addon.protocol :as p]
+            [hive-dirge.harness :as h]))
 
 (def addon-id-str "hive.dirge.probe")
 
@@ -26,6 +27,7 @@
   (capabilities [_] #{:tools :health-reporting :dirge/hooks :dirge/panels})
   (initialize! [_ config]
     (reset! state {:config config :initialized? true})
+    (h/notify! (str addon-id-str " loaded") :info)
     {:success? true :errors [] :metadata {:addon/id addon-id-str}})
   (shutdown! [_]
     (reset! state {:config nil :initialized? false})
