@@ -1,0 +1,12 @@
+{:addon/id           "hive.dirge"
+ :addon/kind         :addon
+ :addon/type         :native
+ :addon/version      "0.1.0"
+ :addon/init-ns      "hive-dirge.hive.addon"
+ :addon/init-fn      "addon-ctor"
+ :addon/config       {:hive/server "hive"}
+ :addon/capabilities #{:tools :health-reporting :dirge/hooks :dirge/commands :dirge/panels}
+ :addon/dependencies #{}
+ :addon/description  "hive inside dirge: /hive catchup, wrap and kanban commands, hive memory search and kanban tools, over dirge's MCP connection to the configured hive server."
+ :addon/maturity     :experimental
+ :addon/trust-class  :foss}
