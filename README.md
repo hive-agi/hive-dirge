@@ -1,11 +1,14 @@
 # hive-dirge
 
 [![ci](https://github.com/hive-agi/hive-dirge/actions/workflows/ci.yml/badge.svg)](https://github.com/hive-agi/hive-dirge/actions/workflows/ci.yml)
+[![release](https://github.com/hive-agi/hive-dirge/actions/workflows/release.yml/badge.svg)](https://github.com/hive-agi/hive-dirge/actions/workflows/release.yml)
+[![Clojars Project](https://img.shields.io/clojars/v/io.github.hive-agi/hive-dirge.svg)](https://clojars.org/io.github.hive-agi/hive-dirge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 The hive side of the [dirge](https://github.com/dirge-code/dirge) integration.
 It holds:
 
+- `hive.dirge`, the hive-mcp harness as dirge slash commands (see below);
 - portable (`.cljc`) IAddons that dirge loads under
   [clojurust](https://github.com/BuddhiLW/clojurust) (`cljrs`), written against the
   `hive-addon` IAddon contract, which also load under JVM Clojure;
@@ -20,15 +23,46 @@ contract), [`hive-dsl`](https://github.com/hive-agi/hive-dsl),
 init-ns). It never
 requires `hive-mcp.*`: addons depend on the contract, never on a host.
 
+## hive.dirge: hive from dirge's command line
+
+With this repo installed as a dirge addon and hive-mcp configured as a dirge MCP
+server (`mcp_servers.hive` in dirge's `config.json`), dirge gains:
+
+| Command | What it does |
+|---|---|
+| `/hive kanban [todo\|inprogress\|inreview\|done]` | this project's tasks, in the chat and a side panel |
+| `/hive memory <query>` | semantic search over hive memory |
+| `/hive swarm` | every agent and its status, working ones first, in a side panel |
+| `/hive catchup` | runs the project catchup and hands it to the model as the next prompt |
+| `/hive shout <message>` | posts progress to the hivemind |
+
+The commands call hive-mcp through dirge's own MCP connection
+(`dirge.harness/mcp-call`), so they cost no model turn. While a hive server is
+connected, a system-prompt note tells the model the commands exist. The server
+name defaults to `hive` (`:addon/config {:server "hive"}` in the manifest);
+failing that, the first connected server whose name mentions hive is used.
+
+Install: symlink this checkout into dirge's addon directory, then run
+`/addons reload` in dirge (or restart it).
+
+```sh
+ln -s "$PWD" ~/.config/dirge/addons/hive-dirge
+```
+
 ## Layout
 
 ```
 .hive-project.edn                      project-id hive-dirge, parent hive
-deps.edn                               clojure + hive-addon + hive-dsl; :dev, :test
+deps.edn                               clojure + hive-addon + hive-dsl; :dev, :test, :build
+version.edn, VERSION                   hive-build release config (:publish :clojars)
+src/hive_dirge/hive/addon.cljc         hive.dirge IAddon (record HiveDirgeAddon): /hive, system-prompt note
+src/hive_dirge/hive/render.cljc        pure: hive answers -> chat text and panel lines
+src/hive_dirge/harness.cljc            dirge.harness from portable code (notify, mcp-call, panel!, ...)
 src/hive_dirge/probe/addon.cljc        probe IAddon (record DirgeProbeAddon, ctor addon-ctor)
 src/hive_dirge/host.clj                hive.dirge.host IAddon (JVM); host/{domain,ports,boundary}.clj strata
 test/hive_dirge/host_test.clj          discovery 0600, token/Origin, reply routing, SSE frames, mount e2e
 resources/META-INF/hive-addons/
+  hive-dirge-hive.edn                  :addon/id "hive.dirge"
   hive-dirge-probe.edn                 mount manifest, :addon/id "hive.dirge.probe"
   hive-dirge-host.edn                  :addon/id "hive.dirge.host"
   hive-olympus-dirge.edn               olympus harness, host hive.dirge.host
@@ -39,7 +73,8 @@ rescue/                                cljrs spike material, kept as found
 
 ## How dirge discovers addons
 
-dirge scans `.dirge/addons/**/META-INF/hive-addons/*.edn`. Every manifest names
+dirge scans `.dirge/addons/` and `~/.config/dirge/addons/` for
+`META-INF/hive-addons/*.edn` (and `META-INF/addons/*.edn`). Every manifest names
 `:addon/init-ns` and `:addon/init-fn`. dirge requires the namespace under cljrs,
 calls the constructor with `:addon/config`, and then drives the IAddon lifecycle
 (`initialize!`, `tools`, `health`, `shutdown!`). A JVM host does the same thing
@@ -82,7 +117,27 @@ clojure -M:dev                         # against the sibling ../hive-addon check
 
 # cljrs smoke: a main.cljc that requires hive-dirge.probe.addon
 cljrs run --src-path src --src-path ../hive-addon/src main.cljc
+
+clojure -T:build jar                   # local jar, as the release builds it
+clojure -T:build verify-license        # LICENSE vs version.edn vs SPDX headers
 ```
+
+## Releases
+
+Published to Clojars as `io.github.hive-agi/hive-dirge` through
+[hive-build](https://github.com/hive-agi/hive-build):
+
+```edn
+io.github.hive-agi/hive-dirge {:mvn/version "RELEASE"}
+```
+
+A push to `main` that changes `src/`, `resources/`, `test/`, `deps.edn`,
+`version.edn` or the workflows runs `.github/workflows/release.yml`: the suite
+gates the release, then `clojure -T:build bump :level :patch`, the changelog,
+an annotated `v<version>` tag and `clojure -T:build deploy`. README-only pushes
+do not mint a version, because a published pom is immutable. A push to
+`staging` runs `staging-gate.yml` (the suite on the declared classpath) and never
+publishes.
 
 ## License
 
