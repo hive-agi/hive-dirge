@@ -1,0 +1,6 @@
+{:project-id "hive-dirge"
+ :parent "hive"
+ :description "Private hive side of the dirge integration: portable (.cljc) IAddons that dirge loads under clojurust (cljrs), and later the hive.dirge.host vessel target. Deps: clojure + hive-addon + hive-dsl. Never requires hive-mcp.*."
+ :language :clojure
+ :tags ["hive-dirge" "dirge" "cljrs" "iaddon" "addon" "private"]
+ :carto {:source-roots ["src" "resources" "test"]}}

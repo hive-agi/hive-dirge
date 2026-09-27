@@ -1,0 +1,21 @@
+{:paths ["src" "resources"]
+ :deps {org.clojure/clojure {:mvn/version "1.12.6"}
+
+        ;; IAddon contract (leaf lib). hive-dirge depends on the contract,
+        ;; never on a host: no hive-mcp.* anywhere.
+        io.github.hive-agi/hive-addon {:mvn/version "1.0.14"}
+
+        ;; Result monad / rescue DSL, same pin as hive-addon.
+        io.github.hive-agi/hive-dsl {:mvn/version "0.5.31"}}
+
+ :aliases
+ {;; Work against the sibling hive-addon checkout instead of the released jar.
+  :dev  {:extra-paths ["dev" "test"]
+         :override-deps {io.github.hive-agi/hive-addon
+                         {:local/root "../hive-addon"}}}
+
+  :test {:extra-paths ["test"]
+         :extra-deps  {io.github.cognitect-labs/test-runner
+                       {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+         :main-opts ["-m" "cognitect.test-runner"]
+         :exec-fn cognitect.test-runner.api/test}}}
