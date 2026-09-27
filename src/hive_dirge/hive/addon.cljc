@@ -2,7 +2,8 @@
   "hive.dirge: the in-dirge IAddon that connects a dirge session to hive over
    dirge's own MCP connection. Contributes the /hive command family
    (catchup, wrap, kanban, swarm), two tools proxying hive memory search and the
-   kanban list, and a static system-prompt hook.
+   kanban list, a static system-prompt hook, and the session hooks that run
+   catchup at session start and wrap at session end.
 
    Effects go through a ports map {:mcp-call :json-parse :panel! :cwd} so the
    pipeline is testable with plain fns; `harness-ports` binds them to
@@ -71,6 +72,23 @@
       :swarm   (swarm! ports config ctx scope))))
 
 ;; ---------------------------------------------------------------------------
+;; Session hooks
+
+(defn session-start
+  "The :dirge/session-start hook: runs hive's catchup when the domain says
+   so and answers {:context text} or nil."
+  [ports config ctx]
+  (when-let [req (d/session-start-request config ctx)]
+    (d/session-start-context config (call! ports req))))
+
+(defn session-end
+  "The :dirge/session-end hook: records a hive wrap when the domain says so.
+   dirge ignores the return value; the mcp-call answer is returned for tests."
+  [ports config ctx]
+  (when-let [req (d/session-end-request config ctx)]
+    (call! ports req)))
+
+;; ---------------------------------------------------------------------------
 ;; Tools
 
 (defn tool-defs
@@ -125,6 +143,8 @@
   (excluded-tools [_] #{})
   (hooks [_]
     {:dirge/system-prompt (fn [_] (d/system-prompt (current-config state)))
+     :dirge/session-start (fn [ctx] (session-start ports (current-config state) ctx))
+     :dirge/session-end   (fn [ctx] (session-end ports (current-config state) ctx))
      :dirge/commands      {"hive" {:description "hive: catchup | wrap | kanban [status] | swarm [scope]"
                                    :handler     (fn [ctx]
                                                   (run-command ports (current-config state) ctx))}}}))

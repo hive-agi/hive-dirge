@@ -4,9 +4,17 @@
  :addon/version      "0.1.0"
  :addon/init-ns      "hive-dirge.hive.addon"
  :addon/init-fn      "addon-ctor"
- :addon/config       {:hive/server "hive"}
+ :addon/config       {:hive/server            "hive"
+                      :hive/auto-catchup?     true
+                      :hive/auto-wrap?        true
+                      :hive/wrap-on-swap?     false
+                      :hive/max-context-chars 12000}
+ ;; :dirge/session-start and :dirge/session-end arrive with the dirge release
+ ;; "dirge addon session hooks"; older dirge ignores the two hooks and
+ ;; /hive catchup and /hive wrap stay available by hand.
+ :dirge/requires     {:session-hooks "dirge addon session hooks"}
  :addon/capabilities #{:tools :health-reporting :dirge/hooks :dirge/commands :dirge/panels}
  :addon/dependencies #{}
- :addon/description  "hive inside dirge: /hive catchup, wrap and kanban commands, hive memory search and kanban tools, over dirge's MCP connection to the configured hive server."
+ :addon/description  "hive inside dirge: automatic catchup at session start and wrap at exit, /hive catchup, wrap, kanban and swarm commands, hive memory search and kanban tools, over dirge's MCP connection to the configured hive server."
  :addon/maturity     :experimental
  :addon/trust-class  :foss}

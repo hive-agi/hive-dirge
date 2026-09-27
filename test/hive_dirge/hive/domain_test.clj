@@ -107,6 +107,60 @@
          (d/tool-answer {:error "nope"}))))
 
 (deftest system-prompt-is-static-text
-  (let [s (d/system-prompt (d/resolve-config {:hive/server "hv"}))]
-    (is (str/includes? s "/hive catchup"))
-    (is (str/includes? s "\"hv\""))))
+  (testing "auto-catchup on: no instruction to run /hive catchup"
+    (let [s (d/system-prompt (d/resolve-config {:hive/server "hv"}))]
+      (is (not (str/includes? s "/hive catchup")))
+      (is (str/includes? s "automatically"))
+      (is (str/includes? s "/hive wrap"))
+      (is (str/includes? s "\"hv\""))))
+  (testing "auto-catchup off: /hive catchup is announced"
+    (let [s (d/system-prompt (d/resolve-config {:hive/auto-catchup? false}))]
+      (is (str/includes? s "/hive catchup"))
+      (is (not (str/includes? s "automatically"))))))
+
+(deftest session-config
+  (is (true? (:hive/auto-catchup? cfg)))
+  (is (true? (:hive/auto-wrap? cfg)))
+  (is (false? (:hive/wrap-on-swap? cfg)))
+  (is (= 12000 (:hive/max-context-chars cfg)))
+  (let [c (d/resolve-config {:addon/config {:hive/auto-catchup? false :hive/auto-wrap? "no"
+                                            :hive/wrap-on-swap? true :hive/max-context-chars 0}})]
+    (is (false? (:hive/auto-catchup? c)))
+    (is (true? (:hive/auto-wrap? c)) "non-boolean falls back")
+    (is (true? (:hive/wrap-on-swap? c)))
+    (is (= 12000 (:hive/max-context-chars c)))))
+
+(deftest session-start-gating
+  (let [ctx {:session-id "s" :cwd "/w/p" :first-prompt? true :mcp-servers ["other" "hive"]}]
+    (is (= ["hive" "project" {"command" "workflow catchup" "directory" "/w/p"}]
+           (d/session-start-request cfg ctx)))
+    (is (= (d/catchup-request cfg "/w/p") (d/session-start-request cfg ctx)))
+    (testing "server missing"
+      (is (nil? (d/session-start-request cfg (assoc ctx :mcp-servers ["other"]))))
+      (is (nil? (d/session-start-request cfg (dissoc ctx :mcp-servers))))
+      (is (nil? (d/session-start-request (d/resolve-config {:hive/server "hv"}) ctx))))
+    (testing "auto-catchup off"
+      (is (nil? (d/session-start-request (d/resolve-config {:hive/auto-catchup? false}) ctx))))))
+
+(deftest session-start-context-shaping
+  (let [ok (fn [t] {:content [{:type "text" :text t}] :isError false})]
+    (is (str/ends-with? (:context (d/session-start-context cfg (ok "CATCHUP"))) "CATCHUP"))
+    (is (nil? (d/session-start-context cfg {:error "down"})))
+    (is (nil? (d/session-start-context cfg nil)))
+    (is (nil? (d/session-start-context cfg (ok "  "))))
+    (testing "truncation"
+      (let [c   (d/resolve-config {:hive/max-context-chars 10})
+            out (:context (d/session-start-context c (ok (apply str (repeat 50 "x")))))]
+        (is (str/includes? out "[... 40 characters truncated]"))
+        (is (not (str/includes? out (apply str (repeat 11 "x")))))))))
+
+(deftest session-end-reason-gating
+  (let [ctx {:session-id "s" :cwd "/w/p"}]
+    (is (= ["hive" "project" {"command" "session wrap" "directory" "/w/p"}]
+           (d/session-end-request cfg (assoc ctx :reason :exit))))
+    (is (nil? (d/session-end-request cfg (assoc ctx :reason :swap))))
+    (is (nil? (d/session-end-request cfg ctx)))
+    (is (some? (d/session-end-request (d/resolve-config {:hive/wrap-on-swap? true})
+                                      (assoc ctx :reason :swap))))
+    (is (nil? (d/session-end-request (d/resolve-config {:hive/auto-wrap? false})
+                                     (assoc ctx :reason :exit))))))

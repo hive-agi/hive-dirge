@@ -74,6 +74,28 @@
     (is (str/includes? s "/hive"))
     (is (= [] @calls))))
 
+(deftest session-hooks-wire-domain
+  (let [calls (atom [])
+        a     (started (stub-ports calls {"project" (text-answer "CATCHUP")}) {})
+        hooks (p/hooks a)
+        start (:dirge/session-start hooks)
+        end   (:dirge/session-end hooks)]
+    (is (nil? (start {:session-id "s" :cwd "/w/p" :first-prompt? true :mcp-servers ["x"]})))
+    (is (= [] @calls))
+    (is (str/includes? (:context (start {:session-id "s" :cwd "/w/p" :first-prompt? true
+                                         :mcp-servers ["hive"]}))
+                       "CATCHUP"))
+    (is (nil? (end {:session-id "s" :cwd "/w/p" :reason :swap})))
+    (end {:session-id "s" :cwd "/w/p" :reason :exit})
+    (is (= [[:mcp "hive" "project" {"command" "workflow catchup" "directory" "/w/p"}]
+            [:mcp "hive" "project" {"command" "session wrap" "directory" "/w/p"}]]
+           @calls))))
+
+(deftest session-hooks-outside-dirge-are-safe
+  (let [a (started addon/harness-ports {})]
+    (is (nil? ((:dirge/session-start (p/hooks a)) {:cwd "/w" :mcp-servers ["hive"]})))
+    ((:dirge/session-end (p/hooks a)) {:cwd "/w" :reason :exit})))
+
 (deftest catchup-command
   (let [calls (atom [])
         a     (started (stub-ports calls {"project" (text-answer "CATCHUP")})

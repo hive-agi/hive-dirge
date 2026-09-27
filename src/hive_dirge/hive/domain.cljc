@@ -14,11 +14,20 @@
    :hive/kanban-limit      50
    :hive/max-prompt-chars  60000
    :hive/memory-limit      10
-   :hive/swarm-scope       :all})
+   :hive/swarm-scope       :all
+   :hive/auto-catchup?     true
+   :hive/auto-wrap?        true
+   :hive/wrap-on-swap?     false
+   :hive/max-context-chars 12000})
 
 (defn- positive-int?
   [x]
   (and (integer? x) (pos? x)))
+
+(defn- flag
+  "Boolean config value `v`, or `default` when `v` is not a boolean."
+  [v default]
+  (if (boolean? v) v default))
 
 (defn resolve-swarm-scope
   "The swarm listing scope out of a configured value: :all (every agent),
@@ -48,7 +57,12 @@
                               (if (positive-int? n) n (:hive/max-prompt-chars default-config)))
      :hive/memory-limit     (let [n (:hive/memory-limit cfg)]
                               (if (positive-int? n) n (:hive/memory-limit default-config)))
-     :hive/swarm-scope      (resolve-swarm-scope (:hive/swarm-scope cfg))}))
+     :hive/swarm-scope      (resolve-swarm-scope (:hive/swarm-scope cfg))
+     :hive/auto-catchup?    (flag (:hive/auto-catchup? cfg) (:hive/auto-catchup? default-config))
+     :hive/auto-wrap?       (flag (:hive/auto-wrap? cfg) (:hive/auto-wrap? default-config))
+     :hive/wrap-on-swap?    (flag (:hive/wrap-on-swap? cfg) (:hive/wrap-on-swap? default-config))
+     :hive/max-context-chars (let [n (:hive/max-context-chars cfg)]
+                               (if (positive-int? n) n (:hive/max-context-chars default-config)))}))
 
 ;; ---------------------------------------------------------------------------
 ;; /hive command parsing
@@ -224,6 +238,57 @@
         {:text text}))))
 
 ;; ---------------------------------------------------------------------------
+;; Session hooks: auto-catchup on :dirge/session-start, auto-wrap on
+;; :dirge/session-end
+
+(defn server-connected?
+  "True when the configured hive server is among `mcp-servers`, the names
+   of the MCP servers dirge connected for the session."
+  [config mcp-servers]
+  (boolean (and (sequential? mcp-servers)
+                (some #(= (:hive/server config) (str %)) mcp-servers))))
+
+(defn session-start-request
+  "mcp-call triple for the automatic catchup at session start, or nil when
+   :hive/auto-catchup? is off or the hive server is not connected. `ctx` is
+   dirge's session-start context {:session-id :cwd :first-prompt?
+   :mcp-servers}."
+  [config ctx]
+  (when (and (:hive/auto-catchup? config)
+             (server-connected? config (:mcp-servers ctx)))
+    (catchup-request config (:cwd ctx))))
+
+(defn session-start-context
+  "session-start hook answer for a catchup `answer`: {:context text} with
+   the catchup text bounded by :hive/max-context-chars, or nil when the
+   call failed or carried no text."
+  [config answer]
+  (when-not (result-error answer)
+    (let [text (result-text answer)]
+      (when-not (str/blank? text)
+        {:context (str "Hive session context for this project, loaded "
+                       "automatically at session start. Keep its axioms and "
+                       "conventions in force.\n\n"
+                       (truncate text (:hive/max-context-chars config)))}))))
+
+(defn wrap-on-end?
+  "True when a session ending for `reason` (:exit or :swap) should record a
+   hive wrap: :hive/auto-wrap? on, and the reason :exit, or :swap with
+   :hive/wrap-on-swap? on."
+  [config reason]
+  (boolean (and (:hive/auto-wrap? config)
+                (or (= :exit reason)
+                    (and (= :swap reason) (:hive/wrap-on-swap? config))))))
+
+(defn session-end-request
+  "mcp-call triple for the automatic wrap at session end, or nil when
+   `wrap-on-end?` says no. `ctx` is dirge's session-end context
+   {:session-id :cwd :reason}."
+  [config ctx]
+  (when (wrap-on-end? config (:reason ctx))
+    (wrap-request config (:cwd ctx))))
+
+;; ---------------------------------------------------------------------------
 ;; Kanban rows -> side panel
 
 (defn kanban-rows
@@ -355,11 +420,19 @@
     {:content (vec (:content answer)) :isError false}))
 
 (defn system-prompt
-  "Static system-prompt text announcing the /hive commands and tools."
+  "Static system-prompt text announcing the /hive commands and tools. With
+   :hive/auto-catchup? on, the context is already loaded at session start,
+   so the user is not told to run /hive catchup."
   [config]
   (str "The hive.dirge addon connects this session to hive (MCP server \""
-       (:hive/server config) "\"). The user can run /hive catchup (load hive "
-       "memory and kanban context), /hive wrap (record a session wrap) and "
+       (:hive/server config) "\"). "
+       (if (:hive/auto-catchup? config)
+         (str "Hive memory and kanban context is loaded automatically at "
+              "session start"
+              (when (:hive/auto-wrap? config)
+                " and a session wrap is recorded at exit")
+              ". The user can run /hive wrap (record a session wrap), ")
+         "The user can run /hive catchup (load hive memory and kanban context), /hive wrap (record a session wrap), ")
        "/hive kanban [status] (show tasks in the side panel) and /hive swarm "
        "[scope] (show hive agents in the side panel). You can call the "
        "hive_memory_search and hive_kanban_list tools to consult hive memory "

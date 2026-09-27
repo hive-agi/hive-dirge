@@ -49,6 +49,21 @@ manifest is used for both.
 To install this repo's addon into a dirge workspace, put (or symlink) `src/` and
 `resources/` under `.dirge/addons/hive-dirge/`.
 
+## hive.dirge session hooks
+
+`hive.dirge` (manifest `hive-dirge.edn`) registers two dirge hooks, available
+from the dirge release "dirge addon session hooks" (older dirge ignores them;
+`/hive catchup` and `/hive wrap` still work by hand):
+
+- `:dirge/session-start` runs hive `workflow catchup` for the session cwd and
+  injects the result into the first turn, bounded by `:hive/max-context-chars`
+  (default 12000, truncated with a marker). Skipped when
+  `:hive/auto-catchup?` is false or the `:hive/server` MCP server is not
+  connected.
+- `:dirge/session-end` runs hive `session wrap` when `:hive/auto-wrap?` is on
+  and the session ends by `:exit`; a `:swap` wraps only with
+  `:hive/wrap-on-swap?` true.
+
 ## Portability rules for addon code
 
 - One `.cljc` file with no host interop and no reader conditionals, unless it
