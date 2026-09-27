@@ -10,8 +10,10 @@
      {\"action\": \"prev-tab\"}
      {\"action\": \"refresh\"}
 
-   Anything else parses to an {:reply/error ..} value; it is recorded and
-   answered 204 like the rest, never thrown back at the client."
+   A well-formed reply is answered 202 as soon as it is queued; the olympus
+   action runs afterwards and its re-render reaches dirge on the SSE stream.
+   Anything else parses to an {:reply/error ..} value, is recorded and is
+   answered 400 at once."
   (:require [clojure.string :as str]
             [hive-vessel.wire :as wire]))
 
@@ -98,3 +100,42 @@
     (if (= ::unparseable message)
       {:reply/error :reply/unparseable}
       (message->command message))))
+
+;; =============================================================================
+;; Reply answer
+;; =============================================================================
+
+(def max-reply-bytes
+  "Largest POST body read; a bigger one is answered 413."
+  65536)
+
+(def reply-queue-capacity
+  "Commands that may wait for the worker; one more is answered 503."
+  64)
+
+(defn reply-admission
+  "HTTP status refusing a /reply request before its body is read, or nil.
+   Same order as hive-vessel's bridge: Origin, then token, then method."
+  [{:keys [origin-allowed? token-ok? method]}]
+  (cond
+    (not origin-allowed?) 403
+    (not token-ok?) 401
+    (not= "POST" method) 405
+    :else nil))
+
+(defn reply-outcome
+  "What happened to COMMAND (a parse-reply value) when offered to the queue;
+   ACCEPTED? is the queue's answer (ignored for an error value)."
+  [command accepted?]
+  (cond
+    (:reply/error command) command
+    accepted? {:reply/accepted (:command command)}
+    :else {:reply/error :reply/queue-full :command (:command command)}))
+
+(defn reply-status
+  "HTTP status answering OUTCOME (a reply-outcome value)."
+  [outcome]
+  (case (:reply/error outcome)
+    nil 202
+    :reply/queue-full 503
+    400))

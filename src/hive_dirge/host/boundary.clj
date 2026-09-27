@@ -1,17 +1,22 @@
 (ns hive-dirge.host.boundary
   "Effects of the dirge vessel host: the token, the 0600 discovery file, the
-   hive-vessel SSE bridge and the adapter reaching hive.olympus through its
-   IAddon hooks. Nothing here names a host namespace; hive.olympus is reached
+   hive-vessel SSE bridge with its /reply route answered here, the single
+   worker running reply commands in order, and the adapter reaching
+   hive.olympus through its IAddon hooks. Nothing here names a host namespace; hive.olympus is reached
    as an injected dependency instance, looked up at every call."
   (:require [clojure.java.io :as io]
             [hive-addon.protocol :as addon]
             [hive-dirge.host.domain :as domain]
             [hive-dirge.host.ports :as ports]
             [hive-vessel.executor.sse :as sse])
-  (:import (java.nio.charset StandardCharsets)
+  (:import (com.sun.net.httpserver HttpExchange HttpHandler HttpServer)
+           (java.io InputStream)
+           (java.nio.charset StandardCharsets)
            (java.nio.file CopyOption Files LinkOption OpenOption Path StandardCopyOption)
            (java.nio.file.attribute FileAttribute PosixFilePermissions)
-           (java.security SecureRandom)))
+           (java.security SecureRandom)
+           (java.util.concurrent ArrayBlockingQueue RejectedExecutionException
+                                 ThreadFactory ThreadPoolExecutor TimeUnit)))
 
 ;; SPDX-License-Identifier: MIT
 
@@ -64,15 +69,60 @@
   [_origin]
   false)
 
+(def reply-path (str domain/route-prefix "/reply"))
+
+(defn- read-bounded
+  "At most LIMIT bytes of IN as UTF-8, or nil when the body is longer."
+  [^InputStream in limit]
+  (let [bytes (.readNBytes in (int (inc limit)))]
+    (when (<= (alength bytes) limit)
+      (String. bytes StandardCharsets/UTF_8))))
+
+(defn- origin-admitted?
+  "A request with no Origin is a terminal client; any Origin goes through
+   refuse-every-origin."
+  [origin]
+  (or (nil? origin) (refuse-every-origin origin)))
+
+(defn- answer! [^HttpExchange ex status]
+  (try
+    (.sendResponseHeaders ex (int status) -1)
+    (finally (.close ex))))
+
+(defn- reply-handler
+  "The /reply route: admission, a bounded body read, then ON-BODY (raw ->
+   HTTP status) decides the answer. Nothing here waits on olympus."
+  [token on-body]
+  (reify HttpHandler
+    (handle [_ ex]
+      (try
+        (let [params (sse/query-params (.getRawQuery (.getRequestURI ex)))
+              refusal (domain/reply-admission
+                       {:origin-allowed? (origin-admitted? (.getFirst (.getRequestHeaders ex) "Origin"))
+                        :token-ok? (sse/token-matches? token (get params "token"))
+                        :method (.getRequestMethod ex)})]
+          (if refusal
+            (answer! ex refusal)
+            (if-let [raw (read-bounded (.getRequestBody ex) domain/max-reply-bytes)]
+              (answer! ex (on-body raw))
+              (answer! ex 413))))
+        (catch Throwable _
+          (try (answer! ex 500) (catch Throwable _ nil)))))))
+
 (defn start-bridge!
   "hive-vessel's SSE bridge on loopback, on a random port unless PORT, gated
-   by TOKEN, refusing every Origin. ON-REPLY receives each raw POST body."
+   by TOKEN, refusing every Origin. Its /reply route is replaced by ours:
+   ON-REPLY receives each admitted raw POST body and returns the HTTP status
+   to answer, so it must not block on the action it accepts."
   [{:keys [port token on-reply heartbeat-ms]}]
-  (sse/start! (cond-> {:port (or port 0)
-                       :token token
-                       :allowed-origin? refuse-every-origin
-                       :on-message on-reply}
-                heartbeat-ms (assoc :heartbeat-ms heartbeat-ms))))
+  (let [bridge (sse/start! (cond-> {:port (or port 0)
+                                    :token token
+                                    :allowed-origin? refuse-every-origin}
+                             heartbeat-ms (assoc :heartbeat-ms heartbeat-ms)))
+        ^HttpServer server (:server bridge)]
+    (.removeContext server ^String reply-path)
+    (.createContext server ^String reply-path ^HttpHandler (reply-handler token on-reply))
+    bridge))
 
 (defn stop-bridge! [bridge] (when bridge (sse/stop! bridge)))
 
@@ -84,6 +134,37 @@
   {:port (:port bridge)
    :clients (sse/clients bridge)
    :panels (sse/retained-panels bridge)})
+
+;; =============================================================================
+;; Reply commands: one worker, arrival order
+;; =============================================================================
+
+(defn- worker-threads []
+  (reify ThreadFactory
+    (newThread [_ r]
+      (doto (Thread. ^Runnable r "hive-dirge-reply")
+        (.setDaemon true)))))
+
+(defrecord SingleWorkerQueue [^ThreadPoolExecutor pool run-command]
+  ports/IActionQueue
+  (submit! [_ command]
+    (try
+      (.execute pool ^Runnable (fn [] (try (run-command command) (catch Throwable _ nil))))
+      true
+      (catch RejectedExecutionException _ false)))
+  (close! [_]
+    (.shutdownNow pool)
+    nil))
+
+(defn single-worker-queue
+  "IActionQueue over one daemon thread and a FIFO of CAPACITY waiting
+   commands; RUN-COMMAND is applied to each command, one at a time, in submission
+   order. A full or closed queue refuses (submit! answers false)."
+  [{:keys [capacity run-command]}]
+  (->SingleWorkerQueue (ThreadPoolExecutor. 1 1 0 TimeUnit/MILLISECONDS
+                                            (ArrayBlockingQueue. (int capacity))
+                                            ^ThreadFactory (worker-threads))
+                       run-command))
 
 ;; =============================================================================
 ;; hive.olympus through its hooks

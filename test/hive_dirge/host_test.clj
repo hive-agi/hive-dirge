@@ -21,7 +21,7 @@
                           HttpRequest$BodyPublishers HttpResponse$BodyHandlers)
            (java.nio.file Files LinkOption)
            (java.nio.file.attribute FileAttribute PosixFilePermissions)
-           (java.util.concurrent LinkedBlockingQueue TimeUnit)))
+           (java.util.concurrent CountDownLatch LinkedBlockingQueue TimeUnit)))
 
 ;; =============================================================================
 ;; Fixtures
@@ -60,6 +60,22 @@
     (.send client (.build b) (HttpResponse$BodyHandlers/ofString))))
 
 (defn- post-reply [doc body] (.statusCode (request (url doc "/reply") :method :post :body body)))
+
+(defn- eventually
+  "Poll PRED every 10 ms for up to MS (default 5000); its last value."
+  ([pred] (eventually pred 5000))
+  ([pred ms]
+   (let [deadline (+ (System/currentTimeMillis) ms)]
+     (loop []
+       (let [v (pred)]
+         (if (or v (> (System/currentTimeMillis) deadline))
+           v
+           (do (Thread/sleep 10) (recur))))))))
+
+(defn- elapsed-ms [f]
+  (let [t0 (System/nanoTime)
+        v (f)]
+    [v (/ (- (System/nanoTime) t0) 1e6)]))
 
 (defn- open-events
   "Subscribe to <url>/events; returns a queue of raw SSE lines."
@@ -189,20 +205,137 @@
 ;; Replies
 ;; =============================================================================
 
+(deftest reply-answer-values
+  (is (= 403 (domain/reply-admission {:origin-allowed? false :token-ok? false :method "POST"})))
+  (is (= 401 (domain/reply-admission {:origin-allowed? true :token-ok? false :method "POST"})))
+  (is (= 405 (domain/reply-admission {:origin-allowed? true :token-ok? true :method "GET"})))
+  (is (nil? (domain/reply-admission {:origin-allowed? true :token-ok? true :method "POST"})))
+  (is (= {:reply/accepted :olympus/refresh}
+         (domain/reply-outcome {:command :olympus/refresh} true)))
+  (is (= 202 (domain/reply-status (domain/reply-outcome {:command :olympus/refresh} true))))
+  (is (= 503 (domain/reply-status (domain/reply-outcome {:command :olympus/refresh} false))))
+  (is (= 400 (domain/reply-status (domain/reply-outcome {:reply/error :reply/unparseable} true)))
+      "an error value is never accepted, whatever the queue said"))
+
 (deftest replies-route-to-olympus
   (let [path (temp-discovery)
         o (recording)]
     (with-host [a {:dirge/discovery-path path :dirge/olympus o}]
       (let [doc (discovery path)]
-        (is (= 204 (post-reply doc "{\"action\":\"focus\",\"target\":\"ling-7\"}")))
-        (is (= 204 (post-reply doc "{\"action\":\"next-tab\"}")))
-        (is (= 204 (post-reply doc "{\"action\":\"refresh\"}")))
-        (is (= 204 (post-reply doc "{\"action\":\"unfocus\"}")))
-        (is (= 204 (post-reply doc "garbage")) "a bad body is still 204")
+        (is (= 202 (post-reply doc "{\"action\":\"focus\",\"target\":\"ling-7\"}")))
+        (is (= 202 (post-reply doc "{\"action\":\"next-tab\"}")))
+        (is (= 202 (post-reply doc "{\"action\":\"refresh\"}")))
+        (is (= 202 (post-reply doc "{\"action\":\"unfocus\"}")))
+        (is (= 400 (post-reply doc "garbage")) "a bad body is refused at once")
+        (is (= 400 (post-reply doc "{\"action\":\"focus\"}")) "focus without a target")
+        (is (= 400 (post-reply doc "{\"action\":\"rm -rf\"}")) "unknown action")
+        (is (eventually #(= 4 (count @(:calls o)))))
         (is (= [[:focus "ling-7"] [:next-tab] [:refresh] [:focus nil]] @(:calls o)))
-        (let [replies ((:dirge/replies (addon/hooks a)))]
-          (is (= 5 (count replies)))
-          (is (= {:reply/error :reply/unparseable} (last replies))))))))
+        (is (eventually #(= 7 (count ((:dirge/replies (addon/hooks a)))))))
+        (is (= 3 (count (filter :reply/error ((:dirge/replies (addon/hooks a)))))))))))
+
+(deftest reply-refusals-are-synchronous
+  (let [path (temp-discovery)
+        o (recording)]
+    (with-host [_ {:dirge/discovery-path path :dirge/olympus o}]
+      (let [doc (discovery path)]
+        (is (= 401 (.statusCode (request (url doc "/reply" "nope") :method :post
+                                         :body "{\"action\":\"refresh\"}"))))
+        (is (= 401 (.statusCode (request (str (get doc "url") "/reply") :method :post
+                                         :body "{\"action\":\"refresh\"}")))
+            "no token")
+        (is (= 403 (.statusCode (request (url doc "/reply") :method :post
+                                         :body "{\"action\":\"refresh\"}"
+                                         :headers [["Origin" "http://127.0.0.1"]]))))
+        (is (= 405 (.statusCode (request (url doc "/reply")))) "GET /reply")
+        (is (= 413 (post-reply doc (apply str (repeat (inc domain/max-reply-bytes) "x")))))
+        (Thread/sleep 100)
+        (is (empty? @(:calls o)) "no refusal reaches olympus")))))
+
+;; A queue stub: records submissions and never runs them, so the answer can
+;; only have come from the handler, not from olympus.
+(defrecord StubQueue [submitted accept?]
+  ports/IActionQueue
+  (submit! [_ command] (swap! submitted conj command) accept?)
+  (close! [_] nil))
+
+(deftest reply-answers-from-the-queue-port
+  (let [path (temp-discovery)
+        o (recording)
+        submitted (atom [])]
+    (with-host [_ {:dirge/discovery-path path :dirge/olympus o
+                   :dirge/action-queue (fn [_run] (->StubQueue submitted true))}]
+      (let [doc (discovery path)]
+        (is (= 202 (post-reply doc "{\"action\":\"prev-tab\"}")))
+        (is (= 400 (post-reply doc "{nope")))
+        (is (= [{:command :olympus/prev-tab}] @submitted) "only valid commands are offered")
+        (is (empty? @(:calls o)) "the handler itself never calls olympus")))
+    (let [full-path (temp-discovery)]
+      (with-host [_ {:dirge/discovery-path full-path :dirge/olympus o
+                     :dirge/action-queue (fn [_run] (->StubQueue (atom []) false))}]
+        (is (= 503 (post-reply (discovery full-path) "{\"action\":\"refresh\"}"))
+            "a full queue is answered 503")))))
+
+(declare run-slow)
+
+;; Slow olympus: every action takes DELAY-MS and logs its start and end.
+(defrecord SlowOlympus [delay-ms log started]
+  ports/IOlympusControl
+  (focus! [this agent-id] (run-slow this [:focus agent-id]))
+  (next-tab! [this] (run-slow this [:next-tab]))
+  (prev-tab! [this] (run-slow this [:prev-tab]))
+  (refresh! [this] (run-slow this [:refresh])))
+
+(defn- run-slow [{:keys [delay-ms log ^CountDownLatch started]} call]
+  (swap! log conj [:start call])
+  (.countDown started)
+  (Thread/sleep (long delay-ms))
+  (swap! log conj [:end call])
+  call)
+
+(deftest reply-returns-before-a-slow-render-and-actions-stay-ordered
+  (let [path (temp-discovery)
+        log (atom [])
+        o (->SlowOlympus 800 log (CountDownLatch. 1))]
+    (with-host [_ {:dirge/discovery-path path :dirge/olympus o}]
+      (let [doc (discovery path)
+            bodies ["{\"action\":\"next-tab\"}"
+                    "{\"action\":\"prev-tab\"}"
+                    "{\"action\":\"focus\",\"target\":\"ling-3\"}"
+                    "{\"action\":\"refresh\"}"]
+            answers (mapv (fn [b] (elapsed-ms #(post-reply doc b))) bodies)]
+        (is (= [202 202 202 202] (mapv first answers)))
+        (is (every? #(< (second %) 500) answers)
+            (str "each reply answers well under one 800 ms action: " (mapv second answers)))
+        (is (.await ^CountDownLatch (:started o) 2 TimeUnit/SECONDS) "the worker picked up the first action")
+        (is (not-any? #(= :end (first %)) @log) "every answer came before the first render finished")
+        (is (eventually #(= 8 (count @log)) 6000))
+        (is (= (mapcat (fn [c] [[:start c] [:end c]])
+                       [[:next-tab] [:prev-tab] [:focus "ling-3"] [:refresh]])
+               @log)
+            "one at a time, in arrival order")))))
+
+(deftest single-worker-queue-keeps-submission-order
+  (let [ran (atom [])
+        q (boundary/single-worker-queue {:capacity 1000
+                                         :run-command (fn [c] (Thread/sleep 1) (swap! ran conj c))})]
+    (try
+      (is (every? true? (mapv #(ports/submit! q %) (range 200))))
+      (is (eventually #(= 200 (count @ran))))
+      (is (= (range 200) @ran))
+      (finally (ports/close! q)))
+    (is (false? (ports/submit! q :late)) "a closed queue refuses")))
+
+(deftest single-worker-queue-refuses-when-full
+  (let [gate (CountDownLatch. 1)
+        q (boundary/single-worker-queue {:capacity 2 :run-command (fn [_] (.await gate))})]
+    (try
+      (is (true? (ports/submit! q 1)) "taken by the worker")
+      (Thread/sleep 50)
+      (is (true? (ports/submit! q 2)))
+      (is (true? (ports/submit! q 3)))
+      (is (false? (ports/submit! q 4)) "capacity 2 waiting")
+      (finally (.countDown gate) (ports/close! q)))))
 
 (defrecord StubAddon [id hook-map]
   addon/IAddon
@@ -286,8 +419,9 @@
             (is (= "retry: 2000" (next-line q2)))
             (is (= "olympus/tab-1" (get (wire/read-json (get (read-frame q2) "data")) "panel/id")))))
         (testing "replies reach the injected hive.olympus hooks"
-          (is (= 204 (post-reply doc "{\"action\":\"focus\",\"target\":\"ling-2\"}")))
-          (is (= 204 (post-reply doc "{\"action\":\"prev-tab\"}")))
+          (is (= 202 (post-reply doc "{\"action\":\"focus\",\"target\":\"ling-2\"}")))
+          (is (= 202 (post-reply doc "{\"action\":\"prev-tab\"}")))
+          (is (eventually #(= 2 (count @olympus-calls))))
           (is (= [[:focus "ling-2"] [:prev-tab]] @olympus-calls))))
       (finally
         (mount/teardown! host (:order report))

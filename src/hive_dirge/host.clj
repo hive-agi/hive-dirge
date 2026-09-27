@@ -7,8 +7,11 @@
    exposes the :dirge vessel target through the hooks hive-olympus.harness
    folds: :vessel/dispatch! and :vessel/target. dirge reads the discovery
    file, subscribes to <url>/events?token=.. and POSTs key presses to
-   <url>/reply?token=..; each reply is routed to hive.olympus
-   (:olympus/focus! :olympus/next-tab! :olympus/prev-tab! :olympus/refresh!).
+   <url>/reply?token=..; each reply is validated, answered at once (202, or
+   4xx for a bad token or body, 503 when the queue is full) and queued; one
+   worker routes the queued commands to hive.olympus in arrival order
+   (:olympus/focus! :olympus/next-tab! :olympus/prev-tab! :olympus/refresh!),
+   and the re-render reaches dirge on the SSE stream.
 
    Config (manifest :addon/config merged with runtime config):
      :dirge/port             bridge port (default 0 = random)
@@ -16,6 +19,9 @@
      :dirge/heartbeat-ms     SSE ': ping' period (default hive-vessel's)
      :dirge/olympus          an IOlympusControl to route replies to (default:
                              hive.olympus's hooks, from :mount/dependencies)
+     :dirge/action-queue     (fn [run-command] IActionQueue) holding accepted
+                             commands (default: one worker thread over a
+                             FIFO of domain/reply-queue-capacity)
 
    The token is only ever written to the 0600 discovery file; health and
    metadata never carry it."
@@ -39,15 +45,34 @@
   (or (:dirge/olympus config)
       (boundary/hooks-olympus (fn [] (boundary/olympus-hooks config)))))
 
-(defn- on-reply-fn
-  "Raw POST body -> parsed command -> routed through OLYMPUS; the outcome is
-   kept (bounded) in STATE's :replies."
+(defn- record! [state outcome]
+  (swap! state update :replies
+         (fn [rs] (vec (take-last reply-log-size (conj (or rs []) (dissoc outcome :result))))))
+  outcome)
+
+(defn- run-command-fn
+  "What the worker applies to each queued command: route it through OLYMPUS
+   and record the outcome."
   [state olympus]
+  (fn [command] (record! state (ports/route! olympus command))))
+
+(defn- action-queue [config run-command]
+  (if-let [make (:dirge/action-queue config)]
+    (make run-command)
+    (boundary/single-worker-queue {:capacity domain/reply-queue-capacity
+                                   :run-command run-command})))
+
+(defn- on-reply-fn
+  "Raw POST body -> parsed command -> offered to QUEUE; returns the HTTP
+   status at once. Refusals are recorded here, routed outcomes by the worker."
+  [state queue]
   (fn [raw]
-    (let [outcome (ports/route! olympus (domain/parse-reply raw))]
-      (swap! state update :replies
-             (fn [rs] (vec (take-last reply-log-size (conj (or rs []) (dissoc outcome :result))))))
-      outcome)))
+    (let [command (domain/parse-reply raw)
+          outcome (domain/reply-outcome command
+                                        (and (not (:reply/error command))
+                                             (ports/submit! queue command)))]
+      (when (:reply/error outcome) (record! state outcome))
+      (domain/reply-status outcome))))
 
 (defn- start! [state seed runtime-config]
   (locking state
@@ -57,10 +82,11 @@
             token (boundary/new-token)
             path (or (:dirge/discovery-path config)
                      (domain/discovery-path (System/getenv "XDG_RUNTIME_DIR")))
+            queue (action-queue config (run-command-fn state (olympus-port config)))
             bridge (boundary/start-bridge! {:port (:dirge/port config)
                                             :token token
                                             :heartbeat-ms (:dirge/heartbeat-ms config)
-                                            :on-reply (on-reply-fn state (olympus-port config))})]
+                                            :on-reply (on-reply-fn state queue)})]
         (try
           (boundary/write-private! path (domain/discovery-json
                                          {:port (:port bridge) :token token
@@ -68,21 +94,23 @@
           (let [registry (atom (v/registry-from-hooks (dependency-hooks config)))
                 target (domain/target (boundary/executor bridge))]
             (swap! state assoc
-                   :lifecycle :active :bridge bridge :discovery path
+                   :lifecycle :active :bridge bridge :queue queue :discovery path
                    :registry registry :target target :replies [])
             {:success? true
              :errors []
              :metadata {:port (:port bridge) :discovery path}})
           (catch Throwable t
             (boundary/stop-bridge! bridge)
+            (ports/close! queue)
             (reset! state {:lifecycle :failed :last-error (ex-message t)})
             {:success? false :errors [(ex-message t)]}))))))
 
 (defn- stop! [state]
   (locking state
-    (let [{:keys [lifecycle bridge discovery]} @state]
+    (let [{:keys [lifecycle bridge queue discovery]} @state]
       (when (= :active lifecycle)
         (boundary/stop-bridge! bridge)
+        (ports/close! queue)
         (try (boundary/delete-file! discovery) (catch Throwable _ nil)))
       (reset! state {:lifecycle :stopped})
       nil)))

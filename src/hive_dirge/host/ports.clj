@@ -3,8 +3,12 @@
 
    IOlympusControl is what a dirge reply drives. The production adapter
    (hive-dirge.host.boundary/hooks-olympus) reaches hive.olympus through its
-   IAddon hooks; tests pass a recording implementation through config."
-  )
+   IAddon hooks; tests pass a recording implementation through config.
+
+   IActionQueue holds accepted reply commands until they run, one at a time
+   and in arrival order. The production adapter
+   (hive-dirge.host.boundary/single-worker-queue) is one worker thread over a
+   bounded FIFO; tests pass a stub through config (:dirge/action-queue).")
 
 ;; SPDX-License-Identifier: MIT
 
@@ -13,6 +17,12 @@
   (next-tab! [port])
   (prev-tab! [port])
   (refresh! [port]))
+
+(defprotocol IActionQueue
+  (submit! [queue command]
+    "Accept COMMAND to be run later, after every command accepted before it.
+     True when accepted, false when the queue is full or closed.")
+  (close! [queue] "Stop accepting; commands not yet started are dropped."))
 
 (defn route!
   "Apply COMMAND (a hive-dirge.host.domain command value) to PORT. Returns
