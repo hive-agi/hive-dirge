@@ -30,17 +30,18 @@ server (`mcp_servers.hive` in dirge's `config.json`), dirge gains:
 
 | Command | What it does |
 |---|---|
-| `/hive kanban [todo\|inprogress\|inreview\|done]` | this project's tasks, in the chat and a side panel |
-| `/hive memory <query>` | semantic search over hive memory |
-| `/hive swarm` | every agent and its status, working ones first, in a side panel |
 | `/hive catchup` | runs the project catchup and hands it to the model as the next prompt |
+| `/hive wrap` | records a hive session wrap for this project |
+| `/hive kanban [todo\|inprogress\|inreview\|done]` | this project's tasks in a side panel |
+| `/hive memory <query>` | semantic search over hive memory, hits in the chat |
+| `/hive swarm` | every agent and its status, working ones first, in a side panel |
 | `/hive shout <message>` | posts progress to the hivemind |
 
-The commands call hive-mcp through dirge's own MCP connection
-(`dirge.harness/mcp-call`), so they cost no model turn. While a hive server is
-connected, a system-prompt note tells the model the commands exist. The server
-name defaults to `hive` (`:addon/config {:server "hive"}` in the manifest);
-failing that, the first connected server whose name mentions hive is used.
+The model also gets two tools, `hive_memory_search` and `hive_kanban_list`, and
+a system-prompt note naming the commands. Everything calls hive-mcp through
+dirge's own MCP connection (`dirge.harness/mcp-call`), so a command costs no
+model turn. The server name comes from `:hive/server` in the manifest's
+`:addon/config` (default `"hive"`).
 
 Install: symlink this checkout into dirge's addon directory, then run
 `/addons reload` in dirge (or restart it).
@@ -55,14 +56,14 @@ ln -s "$PWD" ~/.config/dirge/addons/hive-dirge
 .hive-project.edn                      project-id hive-dirge, parent hive
 deps.edn                               clojure + hive-addon + hive-dsl; :dev, :test, :build
 version.edn, VERSION                   hive-build release config (:publish :clojars)
-src/hive_dirge/hive/addon.cljc         hive.dirge IAddon (record HiveDirgeAddon): /hive, system-prompt note
-src/hive_dirge/hive/render.cljc        pure: hive answers -> chat text and panel lines
+src/hive_dirge/hive/addon.cljc         hive.dirge IAddon (record HiveDirgeAddon): /hive, tools, effects via a ports map
+src/hive_dirge/hive/domain.cljc        pure: config, /hive parsing, MCP requests, answers -> text and panels
 src/hive_dirge/harness.cljc            dirge.harness from portable code (notify, mcp-call, panel!, ...)
 src/hive_dirge/probe/addon.cljc        probe IAddon (record DirgeProbeAddon, ctor addon-ctor)
 src/hive_dirge/host.clj                hive.dirge.host IAddon (JVM); host/{domain,ports,boundary}.clj strata
 test/hive_dirge/host_test.clj          discovery 0600, token/Origin, reply routing, SSE frames, mount e2e
 resources/META-INF/hive-addons/
-  hive-dirge-hive.edn                  :addon/id "hive.dirge"
+  hive-dirge.edn                       :addon/id "hive.dirge"
   hive-dirge-probe.edn                 mount manifest, :addon/id "hive.dirge.probe"
   hive-dirge-host.edn                  :addon/id "hive.dirge.host"
   hive-olympus-dirge.edn               olympus harness, host hive.dirge.host
