@@ -1,8 +1,8 @@
 (ns hive-dirge.hive.addon
   "hive.dirge: the in-dirge IAddon that connects a dirge session to hive over
    dirge's own MCP connection. Contributes the /hive command family
-   (catchup, wrap, kanban), two tools proxying hive memory search and the
-   kanban list, and a static system-prompt hook.
+   (catchup, wrap, kanban, memory, swarm, shout), two tools proxying hive
+   memory search and the kanban list, and a static system-prompt hook.
 
    Effects go through a ports map {:mcp-call :json-parse :panel! :cwd} so the
    pipeline is testable with plain fns; `harness-ports` binds them to
@@ -31,23 +31,51 @@
 ;; ---------------------------------------------------------------------------
 ;; /hive command pipeline
 
+(defn- parsed
+  "The JSON answer of a successful call as data, context blocks cut off."
+  [ports answer]
+  ((:json-parse ports) (d/answer-body (d/result-text answer))))
+
 (defn- kanban!
   [ports config ctx status]
   (let [dir    (directory ports ctx)
         answer (call! ports (d/kanban-request config dir status))]
     (if-let [err (d/result-error answer)]
       {:text (str "/hive kanban failed: " err)}
-      (let [text    (d/result-text answer)
+      (let [text    (d/answer-body (d/result-text answer))
             rows    (d/kanban-rows ((:json-parse ports) text))
             project (d/project-hint dir)]
         ((:panel! ports) (d/kanban-panel rows text project status))
         {:text (d/kanban-summary rows project)}))))
 
+(defn- memory!
+  [ports config ctx query]
+  (let [answer (call! ports (d/memory-search-request config (directory ports ctx) {:query query}))]
+    (if-let [err (d/result-error answer)]
+      {:text (str "/hive memory failed: " err)}
+      {:text (d/memory-text query (parsed ports answer))})))
+
+(defn- swarm!
+  [ports config]
+  (let [answer (call! ports (d/swarm-request config))]
+    (if-let [err (d/result-error answer)]
+      {:text (str "/hive swarm failed: " err)}
+      (let [agents (:agents (parsed ports answer))]
+        ((:panel! ports) (d/swarm-panel agents))
+        {:text (d/swarm-summary agents)}))))
+
+(defn- shout!
+  [ports config ctx message]
+  (let [answer (call! ports (d/shout-request config (directory ports ctx) message))]
+    (if-let [err (d/result-error answer)]
+      {:text (str "/hive shout failed: " err)}
+      {:text "shouted to the hivemind"})))
+
 (defn run-command
   "Handles one /hive invocation against `ports`. Answers a dirge command
    reply {:text ..} or {:text .. :prompt ..}."
   [ports config ctx]
-  (let [{:keys [action status reason]} (d/parse-command ctx)]
+  (let [{:keys [action status reason query message]} (d/parse-command ctx)]
     (case action
       :help    {:text d/usage}
       :unknown {:text (str reason "\n" d/usage)}
@@ -55,7 +83,11 @@
                                 (call! ports (d/catchup-request config (directory ports ctx))))
       :wrap    (d/command-reply config :wrap
                                 (call! ports (d/wrap-request config (directory ports ctx))))
-      :kanban  (kanban! ports config ctx status))))
+      :kanban  (kanban! ports config ctx status)
+      :memory  (memory! ports config ctx query)
+      :swarm   (swarm! ports config)
+      :shout   (shout! ports config ctx message))))
+
 
 ;; ---------------------------------------------------------------------------
 ;; Tools
@@ -112,7 +144,7 @@
   (excluded-tools [_] #{})
   (hooks [_]
     {:dirge/system-prompt (fn [_] (d/system-prompt (current-config state)))
-     :dirge/commands      {"hive" {:description "hive: catchup | wrap | kanban [status]"
+     :dirge/commands      {"hive" {:description "hive: catchup | wrap | kanban [status] | memory <query> | swarm | shout <message>"
                                    :handler     (fn [ctx]
                                                   (run-command ports (current-config state) ctx))}}}))
 

@@ -48,7 +48,10 @@
   "Help text for the /hive command family."
   (str "/hive catchup          load hive session context (memory, kanban, git) into the next turn\n"
        "/hive wrap             record a hive session wrap for this project\n"
-       "/hive kanban [status]  show the project kanban in a side panel (status: todo, inprogress, inreview, done)"))
+       "/hive kanban [status]  show the project kanban in a side panel (status: todo, inprogress, inreview, done)\n"
+       "/hive memory <query>   search hive memory; hits listed in the chat\n"
+       "/hive swarm            every agent and its status, working ones first, in a side panel\n"
+       "/hive shout <message>  post progress to the hivemind"))
 
 (defn- words
   [s]
@@ -59,22 +62,30 @@
 (defn parse-command
   "The /hive invocation as an action map. `ctx` is dirge's command context
    {:args :argv :cwd}; :argv wins over :args when both are present.
-   Answers {:action :catchup|:wrap|:kanban|:help|:unknown ...}."
+   Answers {:action :catchup|:wrap|:kanban|:memory|:swarm|:shout|:help|:unknown ...}."
   [ctx]
   (let [argv (let [v (:argv ctx)]
                (if (and (sequential? v) (seq v)) (vec (map str v)) (words (:args ctx))))
-        [sub & more] argv]
+        [sub & more] argv
+        text (str/join " " more)]
     (case sub
       nil       {:action :help}
       "help"    {:action :help}
       "catchup" {:action :catchup}
       "wrap"    {:action :wrap}
+      "swarm"   {:action :swarm}
       "kanban"  (let [status (first more)]
                   (cond
                     (nil? status)                   {:action :kanban}
                     (contains? kanban-statuses status) {:action :kanban :status status}
                     :else {:action :unknown
                            :reason (str "unknown kanban status: " status)}))
+      "memory"  (if (str/blank? text)
+                  {:action :unknown :reason "usage: /hive memory <query>"}
+                  {:action :memory :query text})
+      "shout"   (if (str/blank? text)
+                  {:action :unknown :reason "usage: /hive shout <message>"}
+                  {:action :shout :message text})
       {:action :unknown :reason (str "unknown /hive subcommand: " sub)})))
 
 ;; ---------------------------------------------------------------------------
@@ -123,6 +134,22 @@
                directory)
        (and (string? type) (not (str/blank? type))) (assoc "type" type))]))
 
+(defn swarm-request
+  "mcp-call triple for hive's agent status across every project: no
+   directory, which would narrow the swarm to one project."
+  [config]
+  [(:hive/server config) "swarm" {"command" "agent status" "verbosity" "slim"}])
+
+(defn shout-request
+  "mcp-call triple posting `message` to the hivemind as progress from dirge."
+  [config directory message]
+  [(:hive/server config) "swarm"
+   (with-directory {"command"    "hivemind shout"
+                    "event_type" "progress"
+                    "task"       "dirge"
+                    "message"    message}
+     directory)])
+
 ;; ---------------------------------------------------------------------------
 ;; MCP result shaping
 
@@ -143,6 +170,15 @@
   [answer]
   (str/join "\n" (keep (fn [c] (when (string? (:text c)) (:text c)))
                        (:content answer))))
+
+(defn answer-body
+  "The answer part of an MCP result text. hive appends context blocks
+   (---MEMORY--- and the like) after the answer, which no JSON reader
+   accepts; they are cut off here."
+  [text]
+  (let [text   (str text)
+        marker (re-find #"\n+---[A-Z][A-Z-]*---" text)]
+    (str/trim (if marker (subs text 0 (str/index-of text marker)) text))))
 
 (defn truncate
   "`s` cut to at most `n` characters, with a marker saying how much was
@@ -237,6 +273,45 @@
            (when (pos? local) (str ", " local " in " project))
            " (side panel)"))))
 
+(defn memory-text
+  "Chat text for a parsed memory search answer {:results [{:id :type :title}]}."
+  [query data]
+  (let [hits (:results data)]
+    (if (seq hits)
+      (str/join "\n"
+                (cons (str (count hits) " memories for \"" query "\"")
+                      (map (fn [{:keys [id type title]}]
+                             (str "  [" type "] " title "  (" id ")"))
+                           hits)))
+      (str "no memories for \"" query "\""))))
+
+(def ^:private status-faces
+  {"working" "success" "idle" "dim" "blocked" "warn" "error" "error"})
+
+(defn swarm-panel
+  "A dirge panel :show op listing swarm `agents` ({:id :status :project-id}),
+   working ones first, each group by id."
+  [agents]
+  (let [working? #(= "working" (:status %))
+        ordered  (concat (sort-by :id (filter working? agents))
+                         (sort-by :id (remove working? agents)))]
+    {:op :show :id "hive-swarm" :title "hive swarm"
+     :lines (if (seq ordered)
+              (mapv (fn [{:keys [id status project-id]}]
+                      {:text (str id " " status (when project-id (str " " project-id)))
+                       :face (get status-faces status "normal")})
+                    ordered)
+              [{:text "no agents" :face "dim"}])}))
+
+(defn swarm-summary
+  "The chat line after the swarm panel: how many agents per status."
+  [agents]
+  (let [by (frequencies (map :status agents))]
+    (str "hive swarm: " (count agents) " agent(s)"
+         (when (seq by)
+           (str ", " (str/join ", " (map (fn [s] (str (get by s) " " s)) (sort (keys by))))))
+         " (side panel)")))
+
 ;; ---------------------------------------------------------------------------
 ;; Addon tool answers and the system prompt
 
@@ -253,7 +328,8 @@
   [config]
   (str "The hive.dirge addon connects this session to hive (MCP server \""
        (:hive/server config) "\"). The user can run /hive catchup (load hive "
-       "memory and kanban context), /hive wrap (record a session wrap) and "
-       "/hive kanban [status] (show tasks in the side panel). You can call the "
+       "memory and kanban context), /hive wrap (record a session wrap), "
+       "/hive kanban [status] and /hive swarm (side panels), /hive memory <query> "
+       "and /hive shout <message>, none of which spends a turn. You can call the "
        "hive_memory_search and hive_kanban_list tools to consult hive memory "
        "and the project kanban."))
