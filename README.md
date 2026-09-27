@@ -5,9 +5,12 @@ The private hive side of the dirge integration. It holds:
 - portable (`.cljc`) IAddons that dirge loads under
   [clojurust](../../clojurust) (`cljrs`), written against the
   `hive-addon` IAddon contract, which also load under JVM Clojure;
-- later, the `hive.dirge.host` vessel target.
+- `hive.dirge.host`: the JVM vessel target `:dirge` (hive-vessel SSE bridge,
+  0600 discovery file `$XDG_RUNTIME_DIR/hive-vessel/dirge.json`, `/reply` key
+  routing to hive.olympus) and the `hive.olympus.dirge` harness manifest.
 
-It depends on `hive-addon` (the contract) and `hive-dsl` only. It never
+It depends on `hive-addon` (the contract), `hive-dsl`, `hive-vessel` and
+`hive-olympus` (for the harness init-ns). It never
 requires `hive-mcp.*`: addons depend on the contract, never on a host.
 
 ## Layout
@@ -16,8 +19,12 @@ requires `hive-mcp.*`: addons depend on the contract, never on a host.
 .hive-project.edn                      project-id hive-dirge, parent hive
 deps.edn                               clojure + hive-addon + hive-dsl; :dev, :test
 src/hive_dirge/probe/addon.cljc        probe IAddon (record DirgeProbeAddon, ctor addon-ctor)
+src/hive_dirge/host.clj                hive.dirge.host IAddon (JVM); host/{domain,ports,boundary}.clj strata
+test/hive_dirge/host_test.clj          discovery 0600, token/Origin, reply routing, SSE frames, mount e2e
 resources/META-INF/hive-addons/
   hive-dirge-probe.edn                 mount manifest, :addon/id "hive.dirge.probe"
+  hive-dirge-host.edn                  :addon/id "hive.dirge.host" (proprietary)
+  hive-olympus-dirge.edn               olympus harness, host hive.dirge.host
 test/hive_dirge/probe/addon_test.clj   manifest -> ctor -> IAddon -> lifecycle
 test/fixtures/probe/                   hot-reload fixtures (v1 / v2 of probe.addon)
 rescue/                                cljrs spike material, kept as found

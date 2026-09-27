@@ -6,13 +6,20 @@
         io.github.hive-agi/hive-addon {:mvn/version "1.0.14"}
 
         ;; Result monad / rescue DSL, same pin as hive-addon.
-        io.github.hive-agi/hive-dsl {:mvn/version "0.5.31"}}
+        io.github.hive-agi/hive-dsl {:mvn/version "0.5.31"}
+
+        ;; hive.dirge.host: the :json dialect, registry and SSE executor.
+        io.github.hive-agi/hive-vessel {:mvn/version "0.1.12"}
+
+        ;; hive.olympus.dirge: the manifest's init-ns is hive-olympus.harness.
+        io.github.hive-agi/hive-olympus {:mvn/version "0.1.11"}}
 
  :aliases
- {;; Work against the sibling hive-addon checkout instead of the released jar.
+ {;; Work against sibling checkouts instead of the released jars.
   :dev  {:extra-paths ["dev" "test"]
-         :override-deps {io.github.hive-agi/hive-addon
-                         {:local/root "../hive-addon"}}}
+         :override-deps {io.github.hive-agi/hive-addon   {:local/root "../hive-addon"}
+                         io.github.hive-agi/hive-vessel  {:local/root "../hive-vessel"}
+                         io.github.hive-agi/hive-olympus {:local/root "../hive-olympus"}}}
 
   :test {:extra-paths ["test"]
          :extra-deps  {io.github.cognitect-labs/test-runner
