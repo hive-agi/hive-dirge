@@ -172,3 +172,55 @@
     (is (= [[:mcp "hv" "memory" {"command" "search" "query" "seal" "limit" 4 "directory" "/w/proj"}]
             [:mcp "hv" "project" {"command" "kanban list" "limit" 50 "directory" "/w/proj" "status" "done"}]]
            @calls))))
+
+(defn- parsing-ports
+  "Stub ports whose json-parse answers `parses` by exact text."
+  [calls answers parses]
+  (assoc (stub-ports calls answers)
+         :json-parse (fn [text] (swap! calls conj [:json text]) (get parses text))))
+
+(deftest kanban-parses-past-appended-context-blocks
+  (let [calls (atom [])
+        a     (started (stub-ports calls {"project" (text-answer "ROWS\n\n---MEMORY---\n{:batch []}\n---/MEMORY---")}) {})
+        reply ((hive-command a) {:argv ["kanban"] :cwd "/w/proj"})]
+    (is (some #{[:json "ROWS"]} @calls) "the JSON reader never sees the context block")
+    (is (= "hive kanban: 1 tasks, 1 in proj (side panel)" (:text reply)))))
+
+(deftest memory-command-lists-hits
+  (let [calls (atom [])
+        a     (started (parsing-ports calls
+                                      {"memory" (text-answer "HITS\n\n---MEMORY---\nx\n---/MEMORY---")}
+                                      {"HITS" {:results [{:id "m1" :type "decision" :title "Reload"}]}})
+                       {:addon/config {:hive/server "hv"}})
+        reply ((hive-command a) {:argv ["memory" "addon" "reload"] :cwd "/w/proj"})]
+    (is (= [:mcp "hv" "memory" {"command" "search" "query" "addon reload" "limit" 10 "directory" "/w/proj"}]
+           (first @calls)))
+    (is (= "1 memories for \"addon reload\"\n  [decision] Reload  (m1)" (:text reply))))
+  (let [a (started (stub-ports (atom []) {}) {})]
+    (is (str/includes? (:text ((hive-command a) {:argv ["memory"]})) "usage: /hive memory"))))
+
+(deftest swarm-command-parses-past-context-blocks-working-first
+  (let [calls (atom [])
+        a     (started (parsing-ports calls
+                                      {"swarm" (text-answer "AGENTS\n\n---MEMORY---\n{:batch []}\n---/MEMORY---")}
+                                      {"AGENTS" {:agents [{:id "b" :status "idle"}
+                                                          {:id "a" :status "working" :project-id "dirge"}]}})
+                       {})
+        reply ((hive-command a) {:argv ["swarm"] :cwd "/w/proj"})
+        panel (some (fn [[k op]] (when (= k :panel) op)) @calls)]
+    (is (= [:mcp "hive" "swarm" {"command" "agent status" "agent_id" "coordinator"}] (first @calls))
+        "default scope :all sends no project_id")
+    (is (some #{[:json "AGENTS"]} @calls) "the JSON reader never sees the context block")
+    (is (= "hive-swarm" (:id panel)))
+    (is (= ["a  working  dirge" "b  idle  -"] (map :text (:lines panel))))
+    (is (= "hive swarm: 2 agents, 1 working (side panel)" (:text reply)))))
+
+(deftest shout-command-posts-progress
+  (let [calls (atom [])
+        a     (started (stub-ports calls {"swarm" (text-answer "ok")}) {})]
+    (is (= {:text "shouted to the hivemind"} ((hive-command a) {:argv ["shout" "s7" "merged"]})))
+    (is (= [:mcp "hive" "swarm" {"command" "hivemind shout" "event_type" "progress"
+                                  "task" "dirge" "message" "s7 merged" "directory" "/w/proj"}]
+           (first @calls))))
+  (let [a (started (stub-ports (atom []) {"swarm" {:error "mcp-call is unavailable"}}) {})]
+    (is (str/includes? (:text ((hive-command a) {:argv ["shout" "x"]})) "mcp-call is unavailable"))))

@@ -32,6 +32,32 @@
   (testing "argv wins over args"
     (is (= {:action :wrap} (d/parse-command {:args "catchup" :argv ["wrap"]})))))
 
+(deftest parse-command-memory-swarm-shout
+  (is (= {:action :memory :query "addon reload"} (d/parse-command {:argv ["memory" "addon" "reload"]})))
+  (is (= :unknown (:action (d/parse-command {:args "memory"}))))
+  (is (= {:action :swarm} (d/parse-command {:args "swarm"})))
+  (is (= {:action :shout :message "done here"} (d/parse-command {:args "shout done here"})))
+  (is (= :unknown (:action (d/parse-command {:args "shout"})))))
+
+(deftest answer-body-cuts-appended-context-blocks
+  (is (= "[1]" (d/answer-body "[1]\n\n---MEMORY---\n{}\n---/MEMORY---\n---FRONTIER---")))
+  (is (= "a\n---\nb" (d/answer-body "a\n---\nb")) "a markdown rule is not a block")
+  (is (= "" (d/answer-body nil))))
+
+(deftest swarm-and-memory-rendering
+  (is (= ["a  working  -" "c  working  x" "b  idle  -"]
+         (map :text (:lines (d/swarm-panel [{:id "b" :status "idle"}
+                                            {:id "c" :status "working" :project-id "x"}
+                                            {:id "a" :status "working"}]
+                                           "" :all))))
+      "working first, each group by id")
+  (is (= [{:text "no agents" :face "dim"}] (:lines (d/swarm-panel [] "" :all))))
+  (is (= "hive swarm: 0 agents (side panel)" (d/swarm-summary [])))
+  (is (= "no memories for \"q\"" (d/memory-text "q" {:results []})))
+  (is (= ["hive" "swarm" {"command" "hivemind shout" "event_type" "progress"
+                          "task" "dirge" "message" "m" "directory" "/w"}]
+         (d/shout-request cfg "/w" "m"))))
+
 (deftest requests
   (is (= ["hive" "project" {"command" "workflow catchup" "directory" "/p/x"}]
          (d/catchup-request cfg "/p/x")))

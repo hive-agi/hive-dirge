@@ -39,6 +39,15 @@
   (is (nil? (d/swarm-rows "text")))
   (is (nil? (d/swarm-rows {:other 1}))))
 
+(deftest swarm-working-first
+  (is (= ["a" "c" "b" "d"]
+         (map :id (d/working-first [{:id "d" :status "idle"} {:id "c" :status "working"}
+                                    {:id "b" :status "blocked"} {:id "a" :status "working"}]))))
+  (is (= [] (d/working-first nil)))
+  (testing "scope parsing keeps working next to memory and shout"
+    (is (= {:action :swarm :scope :all} (d/parse-command {:args "swarm all"})))
+    (is (= {:action :memory :query "swarm"} (d/parse-command {:args "memory swarm"})))))
+
 (deftest swarm-panel-and-summary
   (let [rows [{:id "l1" :status "working" :project-id "hive-dirge"}
               {:id "l2" :status "idle" :project-id nil}]
