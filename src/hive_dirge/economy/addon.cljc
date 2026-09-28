@@ -1,10 +1,13 @@
 (ns hive-dirge.economy.addon
-  "hive.dirge.economy: logs every tool result under a content Handle and
-   serves it back through the context_retrieve tool. Wiring only."
+  "hive.dirge.economy: logs every tool result under a content Handle, serves
+   it back through the context_retrieve tool, and answers dirge's compact hook
+   with a structured, citing Digest. Wiring only."
   (:require [hive-addon.protocol :as p]
             [hive-dirge.economy.adapters.local :as local]
+            [hive-dirge.economy.pipeline.compact :as compact]
             [hive-dirge.economy.pipeline.observe :as observe]
             [hive-dirge.economy.pipeline.retrieve :as retrieve]
+            [hive-dirge.economy.registry :as registry]
             [hive-dirge.harness :as h]))
 
 (def addon-id-str "hive.dirge.economy")
@@ -22,10 +25,22 @@
   (str "s" (rand-int 2147483647)))
 
 (defn make-env
-  "{:log :stats} for the pipelines; the log spills under the session cwd."
+  "{:log :stats :digests} for the pipelines; the log spills under the session
+   cwd. :digests holds each session's last Digest (carry-forward)."
   [ports state]
-  {:log   (local/make-log (local/file-spill #(session-path ports state)))
-   :stats (atom {})})
+  {:log     (local/make-log (local/file-spill #(session-path ports state)))
+   :stats   (atom {})
+   :digests (atom {})})
+
+(defn compact-env
+  "`env` plus the Digestor the addon config selects (registry, OCP) and the
+   optional :now clock port."
+  [env ports state]
+  (let [config (:config @state)]
+    (assoc env
+           :config config
+           :digestor (registry/select :digestor config)
+           :now (:now ports))))
 
 (def retrieve-tool-schema
   {:type       "object"
@@ -56,7 +71,7 @@
   (capabilities [_] #{:tools :health-reporting :dirge/hooks :context/economy})
   (initialize! [_ config]
     (swap! state assoc
-           :config (:addon/config config)
+           :config (or (:addon/config config) (:config @state))
            :session-id (or (:session-id @state) (fresh-session-id))
            :initialized? true)
     {:success? true :errors [] :metadata {:addon/id addon-id-str}})
@@ -72,14 +87,17 @@
   (excluded-tools [_] #{})
   (hooks [_]
     {:dirge/session-start   (fn [ctx] (session-start state ctx))
-     :dirge/after-tool-call (fn [ctx] (observe/after-tool-call env ctx))}))
+     :dirge/after-tool-call (fn [ctx] (observe/after-tool-call env ctx))
+     :dirge/before-compact  (fn [ctx] (compact/before-compact env ctx))
+     :dirge/compact         (fn [ctx] (compact/compact (compact-env env ports state) ctx))}))
 
 (defn make-addon
-  [ports]
-  (let [state (atom {:initialized? false})]
-    (->HiveDirgeEconomyAddon state ports (make-env ports state))))
+  ([ports] (make-addon ports {}))
+  ([ports config]
+   (let [state (atom {:initialized? false :config config})]
+     (->HiveDirgeEconomyAddon state ports (make-env ports state)))))
 
 (defn addon-ctor
   "Manifest :addon/init-fn."
-  [_config]
-  (make-addon harness-ports))
+  [config]
+  (make-addon harness-ports (if (map? config) config {})))
