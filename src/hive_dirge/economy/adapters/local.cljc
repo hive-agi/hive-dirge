@@ -48,7 +48,8 @@
   [s full handle obs]
   (-> s
       (assoc-in [:by-handle handle] (assoc obs :key full))
-      (assoc-in [:by-key full] handle)))
+      (assoc-in [:by-key full] handle)
+      (update-in [:by-body (d/body-key (:tool obs) (:body obs))] #(or % handle))))
 
 (defn- spill!
   [spill stats handle obs]
@@ -76,7 +77,11 @@
             h))))
   (fetch [_ handle rng]
     (when-let [obs (get-in @state [:by-handle handle])]
-      (d/slice rng (:body obs)))))
+      (d/slice rng (:body obs))))
+
+  p/IObservationIndex
+  (handle-of [_ tool body]
+    (get-in @state [:by-body (d/body-key tool body)])))
 
 (defn make-log
   "A LocalObservationLog. `spill` is (fn [line]) or nil."

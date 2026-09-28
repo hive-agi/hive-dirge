@@ -85,6 +85,12 @@
         h2   (fnv1a32 (bit-xor h1 0x9e3779b9) text)]
     (str (hex8 h1) (hex8 h2))))
 
+(defn body-key
+  "Content address of `tool` + `body` alone (args ignored): joins a result
+   seen in a compaction span back to the Observation logged when it arrived."
+  [tool body]
+  (content-key {:signature (str tool) :body (body-text body)}))
+
 (defn mint-handle
   "Shortest prefix (>= 8 hex) of `full` not held by a different content key.
    `owner-of` answers the full key holding a handle, or nil."
