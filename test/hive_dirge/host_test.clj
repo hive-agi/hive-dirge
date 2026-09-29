@@ -6,7 +6,7 @@
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is testing]]
+            [clojure.test :refer [deftest is testing use-fixtures]]
             [hive-addon.mount :as mount]
             [hive-addon.mount.port :as mount-port]
             [hive-addon.protocol :as addon]
@@ -20,6 +20,7 @@
             [hive-vessel.executor.sse :as sse]
             [hive-vessel.wire :as wire])
   (:import (java.net URI)
+           (java.time Duration)
            (java.net.http HttpClient HttpClient$Version HttpRequest
                           HttpRequest$BodyPublishers HttpResponse$BodyHandlers)
            (java.nio.file Files LinkOption)
@@ -56,7 +57,7 @@
   (str (get doc "url") route "?token=" (or token (get doc "token"))))
 
 (defn- request [u & {:keys [method body headers]}]
-  (let [b (reduce (fn [b [k v]] (.header b k v)) (HttpRequest/newBuilder (URI. u)) headers)
+  (let [b (reduce (fn [b [k v]] (.header b k v)) (doto (HttpRequest/newBuilder (URI. u)) (.timeout (Duration/ofSeconds 10))) headers)
         b (if (= :post method)
             (.POST b (HttpRequest$BodyPublishers/ofString (or body "")))
             (.GET b))]
@@ -80,38 +81,51 @@
         v (f)]
     [v (/ (- (System/nanoTime) t0) 1e6)]))
 
+(def ^:dynamic *subscriptions* nil)
+
+(use-fixtures :each
+  (fn [test-fn]
+    (binding [*subscriptions* (atom [])]
+      (try (test-fn)
+           (finally
+             (doseq [{:keys [stream reader]} @*subscriptions*]
+               (.close ^java.util.stream.Stream stream)
+               (future-cancel reader)))))))
+
 (defn- open-events-url
-  "Subscribe to a raw URL; returns a queue of raw SSE lines."
+  "Subscribe to a raw URL. Both the response stream and reader are closed by
+   the per-test fixture, even when an assertion fails."
   [u]
   (let [q (LinkedBlockingQueue.)
-        resp (.send client (.build (HttpRequest/newBuilder (URI. u)))
-                    (HttpResponse$BodyHandlers/ofLines))]
-    (future (try (doseq [l (iterator-seq (.iterator (.body resp)))] (.put q l))
-                 (catch Throwable _ nil)))
+        req (-> (HttpRequest/newBuilder (URI. u))
+                (.timeout (Duration/ofSeconds 10)) (.build))
+        resp (.send client req (HttpResponse$BodyHandlers/ofLines))
+        stream (.body resp)
+        reader (future
+                 (try (doseq [l (iterator-seq (.iterator stream))] (.put q l))
+                      (catch Throwable _ nil)))]
+    (swap! *subscriptions* conj {:stream stream :reader reader})
     q))
 
-(defn- open-events
-  "Subscribe to <url>/events; returns a queue of raw SSE lines."
-  [doc]
-  (let [q (LinkedBlockingQueue.)
-        resp (.send client (.build (HttpRequest/newBuilder (URI. (url doc "/events"))))
-                    (HttpResponse$BodyHandlers/ofLines))]
-    (future (try (doseq [l (iterator-seq (.iterator (.body resp)))] (.put q l))
-                 (catch Throwable _ nil)))
-    q))
+(defn- open-events [doc]
+  (open-events-url (url doc "/events")))
 
 (defn- next-line [^LinkedBlockingQueue q] (.poll q 5 TimeUnit/SECONDS))
 
 (defn- read-frame
-  "The next complete SSE event from Q as {field value}, skipping comments."
-  [q]
-  (loop [acc {}]
-    (let [l (next-line q)]
-      (cond
-        (nil? l) (when (seq acc) acc)
-        (= "" l) (if (seq acc) acc (recur acc))
-        (str/starts-with? l ":") (recur acc)
-        :else (let [[k v] (str/split l #": ?" 2)] (recur (assoc acc k v)))))))
+  "Next complete SSE event, skipping comments, within five seconds TOTAL.
+   Heartbeats must not reset the deadline when no event will ever arrive."
+  [^LinkedBlockingQueue q]
+  (let [deadline (+ (System/nanoTime) (.toNanos (Duration/ofSeconds 5)))]
+    (loop [acc {}]
+      (let [remaining (- deadline (System/nanoTime))
+            l (when (pos? remaining) (.poll q remaining TimeUnit/NANOSECONDS))]
+        (cond
+          (nil? l) (when (seq acc) acc)
+          (= "" l) (if (seq acc) acc (recur acc))
+          (str/starts-with? l ":") (recur acc)
+          :else (let [[k v] (str/split l #": ?" 2)]
+                  (recur (assoc acc k v))))))))
 
 (defmacro with-host [[sym config] & body]
   `(let [~sym (host/addon-ctor ~config)]
@@ -512,7 +526,7 @@
   {:op :ui/show-panel
    :panel/id "kanban"
    :doc {:doc/title "Kanban" :doc/blocks [{:block/type :para :text "No active tasks"}]}
-   :panel/rows [{:text "task-42" :face :row :id "task-42"}]
+   :panel/rows [{:text "task-42" :face :row :id "task-42" :payload {:task 42}}]
    :keys {"enter" {"invoke" "open"}}
    :cursor true})
 
@@ -554,15 +568,16 @@
                               f))))
                 data (wire/read-json (get (eventually frame) "data"))]
             (is (= "kanban" (get data "panel/id")))
-            (is (= true (get data "cursor")))
-            (is (= {"invoke" "open"} (get-in data ["keys" "enter"])))
+            (is (= (when (handshake-bridge?) true) (get data "cursor")))
+            (is (= (when (handshake-bridge?) {"invoke" "open"})
+                   (get-in data ["keys" "enter"])))
             (is (nil? (get data "spans"))
                 "span rows ride inside \"lines\", never a top-level \"spans\"")
             (if (handshake-bridge?)
-              (do (is (some #(and (get % "spans")
-                                  (= "task-42" (get % "id")))
+              (do (is (some #(and (= "task-42" (get % "id"))
+                                  (= {"task" 42} (get % "payload")))
                             (get data "lines"))
-                      "the advertising client's lens rows arrive as span lines with ids")
+                      "lens rows pass through with their ids and payloads")
                   (is (some #(and (nil? (get % "spans"))
                                   (= "task-42" (get % "text")))
                             (get data "lines"))
@@ -588,6 +603,7 @@
 (deftest panel-message-degrades-to-plain-lines-without-features
   (let [m (host/panel-message #{} feature-panel)]
     (is (= "Kanban" (get-in m ["lines" 0 "text"])))
+    (is (= {"task" 42} (get-in m ["lines" 1 "payload"])))
     (is (= "task-42" (get-in m ["lines" 1 "id"]))
         "row ids survive on plain lines even with no client features")
     (is (nil? (get m "spans")))
@@ -607,6 +623,13 @@
         "dirge reads span rows inside \"lines\", never a top-level \"spans\"")
     (is (= {"invoke" "open"} (get-in m ["keys" "enter"])))
     (is (= true (get m "cursor"))))
+  (testing "two-arity vessel renderer puts doc spans inside lines when available"
+    (let [op {:op :ui/show-panel :panel/id "doc"
+              :doc {:doc/title "Title" :doc/blocks [{:block/type :para :text "Body"}]}}
+          message (host/panel-message #{:spans} op)
+          two-arity? (some #{2} (:arglists (meta (resolve 'hive-vessel.dialect.json/show-panel-message))))]
+      (is (nil? (get message "spans")))
+      (is (= (boolean two-arity?) (boolean (some #(get % "spans") (get message "lines")))))))
   (testing "an unadvertised feature never leaks"
     (is (nil? (get (host/panel-message #{:keys} feature-panel) "spans")))
     (is (nil? (get (host/panel-message #{:cursor} feature-panel) "keys")))
@@ -621,8 +644,7 @@
 (deftest target-features-start-empty-and-follow-subscriptions
   (let [path (temp-discovery)]
     (with-host [a {:dirge/discovery-path path :dirge/olympus (recording)}]
-      (let [doc (discovery path)
-            target ((:vessel/target (addon/hooks a)))]
+      (let [target ((:vessel/target (addon/hooks a)))]
         (is (= :dirge (:vessel/id target)))
         (is (= #{} (:vessel/features target))
             "no dirge client has subscribed yet"))
@@ -631,14 +653,14 @@
                                              (str (get doc "token")
                                                   "&vessel=dirge&features=spans,keys,cursor,open-file"))))
             target-features (fn [] (:vessel/features ((:vessel/target (addon/hooks a)))))]
+        (sub)
         (if (handshake-bridge?)
           (is (eventually
                (fn []
-                 (sub) ; the JDK client delivers nothing until more bytes follow
                  (= #{:spans :keys :cursor :open-file} (target-features))))
               "the bridge records the parsed features per client; the target answers them")
           (is (eventually
-               (fn [] (do (sub) (= #{} (target-features)))))
+               (fn [] (= #{} (target-features))))
               "pre-handshake hive-vessel: the resolve fallback degrades to #{}"))))))
 
 (deftest show-panel-feed-degrades-without-features-and-upgrades-with-them
@@ -666,8 +688,8 @@
                 rich? (fn [m] (and (= {"invoke" "open"} (get-in m ["keys" "enter"]))
                                    (= true (get m "cursor"))
                                    (nil? (get m "spans"))
-                                   (some #(and (get % "spans")
-                                               (= "task-42" (get % "id")))
+                                   (some #(and (= "task-42" (get % "id"))
+                                               (= {"task" 42} (get % "payload")))
                                          (get m "lines"))
                                    (some #(= "task-42" (get % "text"))
                                          (get m "lines"))))]

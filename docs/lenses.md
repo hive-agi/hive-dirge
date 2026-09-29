@@ -6,9 +6,9 @@ A lens contributes `{:lens/id :lens/title :lens/panel :lens/open :lens/verbs
 returns `{:fx [show-panel-ops] :text chat-summary}`. A verb receives
 `[ports row-id payload]`. Its show-panel carries `:keys` (lowercase dirge
 chords, with either a reply verb or `{"invoke" "verb"}`) and `:cursor true`.
-For a row-oriented doc, `:lens/rows` holds id-bearing lines parallel to the
-ordinary vessel doc; the dirge-specific JSON translator preserves those ids
-in its top-level `lines`. The panel id is the stable invoke routing key.
+For a row-oriented doc, `:panel/rows` holds id-bearing lines alongside the
+ordinary vessel doc; the dirge-specific JSON translator preserves their ids
+and payloads inside `lines`. The panel id is the stable invoke routing key.
 
 An IAddon exposes `:dirge/lenses` (a collection or zero-arg function) in its
 `hooks` map and `:dirge/invoke` (fn of `{:panel :verb :row :payload}` returning
@@ -35,11 +35,10 @@ sets: a feature is present when *any* client advertised it. Every consumer of
 `:vessel/features` gates on that union: the dirge show-panel translator ships
 `spans`, `keys` and `cursor` whenever the union contains them. The union is the
 capability-projection policy -- a feature a client never advertised must not
-degrade the clients that did (and a translator that must degrade rather than
-upgrade gates on the complement of its own choosing, never on the union).
+degrade the clients that did (and unknown fields are ignored by clients without that feature).
 Plain lines always carry row `id`s, so invoke routing works on any client.
 
-- `:spans` — the message also carries the structured `"spans"` breakdown of the doc.
+- `:spans` — structured span rows appear inside `"lines"`, never as a top-level `"spans"` field; without it lines flatten to text while retaining row ids and payloads.
 - `:keys` — the message carries `"keys"` (dirge chords) when the panel declares them.
 - `open-file` — reserved for the open-file feed op.
 

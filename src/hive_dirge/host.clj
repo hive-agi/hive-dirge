@@ -50,43 +50,36 @@
 ;; =============================================================================
 
 (defn- span-lines-message
-  "The hive-vessel show-panel-message, resolved at call time: branch
-   lens-h1-span-lines adds the 2-arity [op target], which renders span lines
-   when (:vessel/features target) contains :spans; the pinned 0.1.12 has only
-   the 1-arity, which renders plain lines either way. The single indirection
-   point for the dialect upgrade -- never a load-time capture."
-  (^java.util.Map [op] (span-lines-message op nil))
-  (^java.util.Map [op target]
-   (if-let [f (resolve 'hive-vessel.dialect.json/show-panel-message)]
-     (f op target)
-     (json/show-panel-message op))))
+  "Resolve the vessel dialect at call time. 0.1.12 has only the one-arity
+   implementation; use that plain renderer when the two-arity seam is absent."
+  [op target]
+  (let [f (or (resolve 'hive-vessel.dialect.json/show-panel-message)
+              #'json/show-panel-message)]
+    (if (some #{2} (:arglists (meta f)))
+      (f op target)
+      (f op))))
 
-(defn- flatten-span-rows
-  "Span lines -> plain lines: a line that carries a \"spans\" breakdown keeps
-   only {text, face, id}; plain lines pass through unchanged. Id-bearing rows
-   keep their id, so invoke routing works on any client."
-  [rows]
-  (mapv #(if (contains? % "spans")
-           (select-keys % ["text" "face" "id"])
-           %)
-        rows))
+(defn- plain-row [row]
+  (let [spans (or (get row "spans") (:spans row))
+        text (or (get row "text") (:text row)
+                 (apply str (map #(or (get % "text") (:text %)) spans)))]
+    (cond-> (dissoc row "spans" :spans)
+      spans (assoc "text" text))))
 
-(defn- plain-lines
-  "The pre-handshake wire: the doc's rendered lines, flattened to plain
-   lines, plus -- when the op carries :panel/rows (a lens view) -- the title
-   followed by the rows as plain lines."
-  [op]
-  ;; show-panel-message passes every op field through, so the plain wire
-  ;; strips the fields the feature gates own (and the internal rows); each
-  ;; gate re-adds its field when the client advertised it.
-  (let [message (update (dissoc (span-lines-message op) "keys" "cursor" "panel/rows")
-                        "lines" flatten-span-rows)
-        rows (:panel/rows op)]
-    (if (seq rows)
-      (assoc message "lines"
-             (wire/->json-data
-              (into [{:text (get-in op [:doc :doc/title]) :face :title}] rows)))
-      message)))
+(defn- panel-rows [op spans?]
+  (when (seq (:panel/rows op))
+    (let [rows (wire/->json-data
+                (into [{:text (get-in op [:doc :doc/title]) :face :title}]
+                      (:panel/rows op)))]
+      (if spans? rows (mapv plain-row rows)))))
+
+(defn- panel-lines [op spans?]
+  (let [message (dissoc (span-lines-message op (when spans? {:vessel/features #{:spans}}))
+                        "keys" "cursor" "panel/rows" "spans")
+        rows (panel-rows op spans?)]
+    (cond-> message
+      rows (assoc "lines" rows)
+      (not spans?) (update "lines" #(mapv plain-row %)))))
 
 (defn panel-message
   "The :json show-panel message for a connected dirge client set whose
@@ -95,14 +88,14 @@
 
      :spans   the \"lines\" carry their span rows:
               {\"face\": .., \"id\": .., \"spans\": [{\"text\": .., \"face\": ..}]};
-              lens :panel/rows pass through unchanged as rows, ids included
+              lens :panel/rows pass through as rows, ids and payloads included
      :keys    the message carries \"keys\" (dirge chords -> reply verb or
               {\"invoke\" verb}) whenever the op carries :keys
      :cursor  the message carries \"cursor\": true whenever the op carries
               a truthy :cursor
 
    Anything not advertised degrades: without :spans every span row flattens
-   to a plain {text, face, id} line, and the keys/cursor fields are omitted
+   to a plain {text, face, id, payload} line, and the keys/cursor fields are omitted
    -- never a richer message than the client's feature set, never an error.
    There is no top-level \"spans\" key: dirge reads span rows inside \"lines\"
    (docs/panel-feed.md). With no client connected FEATURES is #{}
@@ -114,8 +107,8 @@
   [features op]
   (let [features (or features #{})
         with-spans (if (contains? features :spans)
-                     (span-lines-message op {:vessel/features features})
-                     (plain-lines op))]
+                     (panel-lines op true)
+                     (panel-lines op false))]
     (cond-> with-spans
       (and (contains? features :keys) (:keys op))
       (assoc "keys" (wire/->json-data (:keys op)))

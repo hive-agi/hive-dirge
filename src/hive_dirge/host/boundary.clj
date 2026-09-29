@@ -135,11 +135,9 @@
    bridge. nil or a blank subscription `features` param is no features, so
    with no client this is #{}.
 
-   UNION vs INTERSECTION: the target advertises the union, so a client that
-   supports a feature always sees it; a translator that must degrade rather
-   than upgrade gates on the complement (ship spans/keys/cursor only when
-   EVERY connected client advertised them) -- see the lens-panel translator
-   in hive-dirge.host.
+   Every translator gates on that same union: upgraded output is sent if any
+   connected client advertises the feature. Clients lacking it ignore fields
+   they do not understand; no intersection-based downgrade is applied.
 
    The reader resolves `hive-vessel.executor.sse/client-features` at call
    time: it exists only from hive-vessel 0.1.13 (commit d7fda1a, branch
