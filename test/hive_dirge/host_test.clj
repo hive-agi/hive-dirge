@@ -144,6 +144,41 @@
     (is (= {:reply/error :reply/unparseable} (ports/route! o {:reply/error :reply/unparseable})))
     (is (= [[:focus "a"] [:focus nil] [:next-tab] [:prev-tab] [:refresh]] @(:calls o)))))
 
+(defprotocol ProbePort
+  (probe! [port payload]))
+
+(defrecord RecordingProbe [calls]
+  ProbePort
+  (probe! [_ payload] (swap! calls conj [:probe payload]) :probed))
+
+(deftest route-command-registry
+  (testing "the five olympus commands are registered by default"
+    (is (every? (ports/registered-commands)
+                [:olympus/focus :olympus/unfocus :olympus/next-tab
+                 :olympus/prev-tab :olympus/refresh])))
+  (testing "a command with no method is a port-threw error, not an exception"
+    (let [r (ports/route! (recording) {:command ::unregistered})]
+      (is (= :reply/port-threw (:reply/error r)))
+      (is (= ::unregistered (:command r)))))
+  (testing "an addon extends the registry without editing route!"
+    (defmethod ports/route-command ::probe [port cmd] (probe! port (:payload cmd)))
+    (try
+      (let [p (->RecordingProbe (atom []))]
+        (is (contains? (ports/registered-commands) ::probe))
+        (is (= {:routed ::probe :result :probed}
+               (ports/route! p {:command ::probe :payload 42})))
+        (is (= [[:probe 42]] @(:calls p))))
+      (finally
+        (remove-method ports/route-command ::probe)))
+    (is (not (contains? (ports/registered-commands) ::probe))))
+  (testing "a method that throws becomes a port-threw error"
+    (defmethod ports/route-command ::boom [_ _] (throw (ex-info "boom" {})))
+    (try
+      (is (= {:reply/error :reply/port-threw :command ::boom :message "boom"}
+             (ports/route! (recording) {:command ::boom})))
+      (finally
+        (remove-method ports/route-command ::boom)))))
+
 ;; =============================================================================
 ;; Discovery file
 ;; =============================================================================
