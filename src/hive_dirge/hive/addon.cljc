@@ -19,7 +19,8 @@
   {:mcp-call   h/mcp-call
    :json-parse h/json-parse
    :panel!     h/panel!
-   :cwd        h/cwd})
+   :cwd        h/cwd
+   :log!       h/log!})
 
 (defn- call!
   [ports [server tool args]]
@@ -110,6 +111,27 @@
     (call! ports req)))
 
 ;; ---------------------------------------------------------------------------
+;; Command hooks
+
+(defn guard-hook
+  "The \"guard\" command hook (`{\"type\": \"addon\", \"addon\": \"hive.dirge\",
+   \"handler\": \"guard\"}` in a dirge hooks block): the hook payload in `ctx`
+   judged by hive's guard over MCP. Answers the Claude-style hook JSON dirge
+   reads as the hook's stdout. FAIL-OPEN: any way of getting no verdict
+   answers {} (the action allowed) and logs why. That includes hooks dirge
+   runs on its event loop, where an MCP call is refused at once."
+  [ports config ctx]
+  (let [{:keys [answer gap]}
+        (try
+          (d/guard-answer (call! ports (d/guard-request config (:payload ctx)))
+                          (:json-parse ports))
+          (catch #?(:clj Throwable :default :default) t
+            {:answer {} :gap (str "guard hook failed: " (or (ex-message t) t))}))]
+    (when-let [log! (and gap (:log! ports))]
+      (log! :warn (str "hive guard: allowed unjudged, " gap)))
+    answer))
+
+;; ---------------------------------------------------------------------------
 ;; Tools
 
 (defn tool-defs
@@ -146,7 +168,7 @@
   p/IAddon
   (addon-id [_] addon-id-str)
   (addon-type [_] :native)
-  (capabilities [_] #{:tools :health-reporting :dirge/hooks :dirge/commands :dirge/panels})
+  (capabilities [_] #{:tools :health-reporting :dirge/hooks :dirge/commands :dirge/command-hooks :dirge/panels})
   (initialize! [_ config]
     (reset! state {:config (d/resolve-config config) :initialized? true})
     {:success? true :errors [] :metadata {:addon/id addon-id-str}})
@@ -168,7 +190,8 @@
      :dirge/session-end   (fn [ctx] (session-end ports (current-config state) ctx))
      :dirge/commands      {"hive" {:description "hive: catchup | wrap | kanban [status] | memory <query> | swarm [scope] | shout <message>"
                                    :handler     (fn [ctx]
-                                                  (run-command ports (current-config state) ctx))}}}))
+                                                  (run-command ports (current-config state) ctx))}}
+     :dirge/command-hooks {"guard" (fn [ctx] (guard-hook ports (current-config state) ctx))}}))
 
 (defn make-addon
   "An uninitialized addon over `ports`."
