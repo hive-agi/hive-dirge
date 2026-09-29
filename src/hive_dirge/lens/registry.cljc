@@ -115,19 +115,20 @@
    chords and cursor flag, or nothing when the lens declares no chords."
   [l]
   (when (seq (:lens/keys l))
-    {"keys" (:lens/keys l)
-     "cursor" (boolean (:lens/cursor? l))}))
+    {:keys (:lens/keys l)
+     :cursor (boolean (:lens/cursor? l))}))
 
 (defn panel-op
-  "The ui/show-panel op for lens L showing DOC, carrying the lens's key
-   chords and the cursor flag. The doc's rendered lines keep whatever ids
-   the lens stamped on them (row ids dirge echoes back on invoke)."
+  "The ui/show-panel op for lens L showing DOC. DOC carries ordinary vessel
+   blocks plus optional :lens/rows (id-bearing lines); the dirge translator
+   uses those rows to preserve ids in the wire lines."
   [l doc]
   (cond-> {:op          :ui/show-panel
            :panel/id    (:lens/panel l)
            :panel/title (:lens/title l)
-           :doc         doc}
-    (seq (:lens/keys l)) (assoc :panel/keys (keys-payload l))))
+           :doc         (dissoc doc :lens/rows)
+           :panel/rows (vec (or (:lens/rows doc) []))}
+    (seq (:lens/keys l)) (merge (keys-payload l))))
 
 (defn open!
   "Open LENS through PORTS: the lens's :lens/open pull runs and its answer is
@@ -159,8 +160,8 @@
     (if-let [handler (get (:lens/verbs l) verb)]
       {:invoke/routed (:lens/id l) :verb verb :row row
        :effects (fn [ports] (handler ports row payload))}
-      {:invoke/unknown-panel panel :verb verb :panel-owner (:lens/id l)})
-    {:invoke/unknown-panel panel :verb verb}))
+      {:invoke/unknown-verb verb :verb verb :panel panel :panel-owner (:lens/id l)})
+    {:invoke/unknown-panel panel :panel panel :verb verb}))
 
 ;; =============================================================================
 ;; Capabilities derivation (feeds the C3 discovery doc)
@@ -177,13 +178,15 @@
 
 (defn merged-keys
   "The key chords of every lens merged into one map, string chords. A chord
-   bound by two lenses keeps the first binding; chords are panel-scoped in
-   practice (the client binds them when the lens's panel is focused)."
+   bound by two lenses keeps the first binding; each panel carries its own
+   authoritative :keys, so discovery is only a global capability hint."
   [registry]
   (->> (list-lenses registry)
        (map :lens/keys)
        (filter map?)
-       (reduce (fn [acc ks] (merge acc ks)) {})))
+       (reduce (fn [acc ks]
+                 (reduce-kv (fn [m chord binding]
+                              (if (contains? m chord) m (assoc m chord binding))) acc ks)) {})))
 
 (defn capabilities-fragment
   "The pure derivation of the C3 capabilities fragment: {\"invokes\" [...]
@@ -214,13 +217,12 @@
             p    (panel data text)
             doc  (if (:markdown p)
                    {:doc/title  (:title p)
-                    :doc/blocks [{:block/type :markdown :text (:markdown p)}]}
+                    :doc/blocks [{:block/type :code :text (:markdown p)}]}
                    {:doc/title  (:title p)
-                    :doc/blocks (mapv (fn [line] {:block/type :line :line line})
-                                      (:lines p))})]
-        {:fx   [(cond-> (panel-op lens doc)
-                  (seq (:lens/keys lens))
-                  (assoc :panel/keys (keys-payload lens)))]
+                    :doc/blocks (mapv (fn [line] {:block/type :para :text (:text line)})
+                                      (:lines p))
+                    :lens/rows (:lines p)})]
+        {:fx   [(panel-op lens doc)]
          :text (summary data)}))))
 
 (def kanban-lens
@@ -230,8 +232,7 @@
    :lens/title   "Kanban"
    :lens/panel   "kanban"
    :lens/cursor? true
-   :lens/keys    {"enter" {"invoke" "open"}
-                  "n"     "next-status"}
+   :lens/keys    {"enter" {"invoke" "open"}}
    :lens/open
    (fn [ports config ctx]
      (let [status (:lens/status ctx)
@@ -249,12 +250,9 @@
                                  (domain/kanban-summary (domain/kanban-rows data)
                                                         (domain/project-hint dir)))})))
    :lens/verbs
-   {"move" (fn [ports row payload]
-             (when-let [log! (:log! ports)]
-               (log! :info (str "kanban move " row " -> " (pr-str (:status payload))))))
-    "open" (fn [ports row _payload]
-             (when (and row (:feed! ports))
-               ((:feed! ports) {"op" "open-file" "path" (str "kanban://" row)})))}})
+   {"open" (fn [ports row _payload]
+             (when (and row (:log! ports))
+               ((:log! ports) :info (str "kanban open " row))))}})
 
 (def swarm-lens
   "The hive agents as a lens: pulls the agent registry over the hive MCP

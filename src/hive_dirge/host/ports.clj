@@ -45,7 +45,7 @@
    or the error value unchanged when COMMAND is one. A port method that
    throws becomes {:reply/error :reply/port-threw}."
   ([port command] (route! port nil command))
-  ([port router {:keys [command agent-id invoke] :as cmd}]
+  ([port router {:keys [command agent-id] :as cmd}]
    (if (:reply/error cmd)
      cmd
      (try

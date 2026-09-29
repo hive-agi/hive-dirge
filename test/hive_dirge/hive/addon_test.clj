@@ -126,16 +126,16 @@
     (is (= "hive kanban: 1 tasks, 1 in proj (side panel)" (:text reply)))
     (is (= :ui/show-panel (:op panel)))
     (is (= "kanban" (:panel/id panel)))
-    (is (= {"keys" {"enter" {"invoke" "open"}, "n" "next-status"}, "cursor" true}
-           (:panel/keys panel)))
-    (is (= ["[todo] t  1"] (map (comp :text :line) (:doc/blocks (:doc panel)))))
-    (is (= ["1"] (map (comp :id :line) (:doc/blocks (:doc panel)))))))
+    (is (= {:keys {"enter" {"invoke" "open"}}, :cursor true}
+           (select-keys panel [:keys :cursor])))
+    (is (= ["[todo] t  1"] (map (comp :text identity) (:panel/rows panel))))
+    (is (= ["1"] (map (comp :id identity) (:panel/rows panel))))))
 
 (deftest kanban-unparsable-falls-back-to-markdown
   (let [calls (atom [])
         a     (started (stub-ports calls {"project" (text-answer "# not json")}) {})]
     ((hive-command a) {:argv ["kanban"]})
-    (is (= {:block/type :markdown :text "# not json"}
+    (is (= {:block/type :code :text "# not json"}
            (get-in (some (fn [[k op]] (when (= k :panel) op)) @calls)
                    [:doc :doc/blocks 0])))))
 
@@ -150,10 +150,10 @@
     (is (= "hive swarm: 1 agents, 1 working (side panel)" (:text reply)))
     (is (= :ui/show-panel (:op panel)))
     (is (= "swarm" (:panel/id panel)))
-    (is (= {"keys" {"enter" {"invoke" "focus"}}, "cursor" true}
-           (:panel/keys panel)))
-    (is (= ["l1  working  p"] (map (comp :text :line) (:doc/blocks (:doc panel)))))
-    (is (= ["l1"] (map (comp :id :line) (:doc/blocks (:doc panel)))))))
+    (is (= {:keys {"enter" {"invoke" "focus"}}, :cursor true}
+           (select-keys panel [:keys :cursor])))
+    (is (= ["l1  working  p"] (map (comp :text identity) (:panel/rows panel))))
+    (is (= ["l1"] (map (comp :id identity) (:panel/rows panel))))))
 
 (deftest swarm-command-honours-configured-scope
   (let [calls (atom [])
@@ -166,7 +166,7 @@
   (let [calls (atom [])
         a     (started (stub-ports calls {}) {})]
     (is (str/includes? (:text ((hive-command a) {:args ""})) "/hive catchup"))
-    (is (str/includes? (:text ((hive-command a) {:args "nope"})) "unknown /hive subcommand"))
+    (is (str/includes? (:text ((hive-command a) {:args "nope"})) "unknown lens: nope"))
     (is (= [] @calls))))
 
 (deftest tools-proxy-hive
@@ -223,7 +223,7 @@
     (is (some #{[:json "AGENTS"]} @calls) "the JSON reader never sees the context block")
     (is (= "swarm" (:panel/id panel)))
     (is (= ["a  working  dirge" "b  idle  -"]
-           (map (comp :text :line) (:doc/blocks (:doc panel)))))
+           (map (comp :text identity) (:panel/rows panel))))
     (is (= "hive swarm: 2 agents, 1 working (side panel)" (:text reply)))))
 
 (deftest shout-command-posts-progress

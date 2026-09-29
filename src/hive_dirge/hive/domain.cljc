@@ -102,27 +102,14 @@
       "help"    {:action :help}
       "catchup" {:action :catchup}
       "wrap"    {:action :wrap}
-      "kanban"  (let [status (first more)]
-                  (cond
-                    (nil? status)                   {:action :lens :lens "kanban"}
-                    (contains? kanban-statuses status) {:action :lens :lens "kanban" :status status}
-                    :else {:action :unknown
-                           :reason (str "unknown kanban status: " status)}))
-      "swarm"   (if-let [scope (first more)]
-                  {:action :lens :lens "swarm" :scope (resolve-swarm-scope scope)}
-                  {:action :lens :lens "swarm"})
-      "lens"    {:action :lens :lens (first more) :args (vec more)}
-      "invoke"  {:action :invoke
-                 :panel (first more)
-                 :verb  (second more)
-                 :row   (nth more 2 nil)}
+      "lens"    {:action :lens :lens (first more) :args (vec (rest more))}
       "memory"  (if (str/blank? text)
                   {:action :unknown :reason "usage: /hive memory <query>"}
                   {:action :memory :query text})
       "shout"   (if (str/blank? text)
                   {:action :unknown :reason "usage: /hive shout <message>"}
                   {:action :shout :message text})
-      {:action :unknown :reason (str "unknown /hive subcommand: " sub)})))
+      {:action :lens :lens sub :args (vec more)})))
 
 ;; ---------------------------------------------------------------------------
 ;; Requests: [server tool args] triples for dirge.harness/mcp-call

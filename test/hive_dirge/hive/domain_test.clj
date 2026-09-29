@@ -25,18 +25,18 @@
   (is (= {:action :help} (d/parse-command {})))
   (is (= {:action :catchup} (d/parse-command {:args "catchup"})))
   (is (= {:action :wrap} (d/parse-command {:argv ["wrap"]})))
-  (is (= {:action :lens :lens "kanban"} (d/parse-command {:args " kanban "})))
-  (is (= {:action :lens :lens "kanban" :status "todo"} (d/parse-command {:argv ["kanban" "todo"]})))
-  (is (= :unknown (:action (d/parse-command {:argv ["kanban" "later"]}))))
-  (is (= :unknown (:action (d/parse-command {:args "frobnicate"}))))
+  (is (= {:action :lens :lens "kanban" :args []} (d/parse-command {:args " kanban "})))
+  (is (= {:action :lens :lens "kanban" :args ["todo"]} (d/parse-command {:argv ["kanban" "todo"]})))
+  (is (= {:action :lens :lens "kanban" :args ["later"]} (d/parse-command {:argv ["kanban" "later"]})))
+  (is (= {:action :lens :lens "frobnicate" :args []} (d/parse-command {:args "frobnicate"})))
   (testing "argv wins over args"
     (is (= {:action :wrap} (d/parse-command {:args "catchup" :argv ["wrap"]})))))
 
 (deftest parse-command-memory-swarm-shout
   (is (= {:action :memory :query "addon reload"} (d/parse-command {:argv ["memory" "addon" "reload"]})))
   (is (= :unknown (:action (d/parse-command {:args "memory"}))))
-  (is (= {:action :lens :lens "swarm"} (d/parse-command {:args "swarm"})))
-  (is (= {:action :lens :lens "swarm" :scope :all} (d/parse-command {:args "swarm all"})))
+  (is (= {:action :lens :lens "swarm" :args []} (d/parse-command {:args "swarm"})))
+  (is (= {:action :lens :lens "swarm" :args ["all"]} (d/parse-command {:args "swarm all"})))
   (is (= {:action :shout :message "done here"} (d/parse-command {:args "shout done here"})))
   (is (= :unknown (:action (d/parse-command {:args "shout"})))))
 

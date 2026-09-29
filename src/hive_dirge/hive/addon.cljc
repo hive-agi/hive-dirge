@@ -52,19 +52,23 @@
    it too (with the bad name called out), a known one opens it, delivering
    every fx through the panel port."
   [registry ports config ctx]
-  (let [{:keys [status scope lens]} (d/parse-command ctx)
+  (let [{:keys [lens args]} (d/parse-command ctx)
+        status (when (= lens "kanban") (first args))
+        scope (when (= lens "swarm") (first args))
         open  (lens/parse-open registry lens)
         ctx   (cond-> ctx
                 status (assoc :lens/status status)
-                scope  (assoc :lens/scope scope))
+                scope (assoc :lens/scope (d/resolve-swarm-scope scope)))
         emit! (fn [fx] (run! #((:panel! ports) %) fx))]
-    (case (:command open)
+    (if (and (= lens "kanban") status (not (contains? d/kanban-statuses status)))
+      {:text (str "unknown kanban status: " status)}
+      (case (:command open)
       :lens/list     {:text (lens/list-usage registry)}
       :lens/unknown  {:text (str "unknown lens: " (:input open) "\n"
                                  (lens/list-usage registry))}
       :lens/open     (let [out (lens/open! ports config ctx (:lens open))]
                        (emit! (:fx out))
-                       {:text (:text out)}))))
+                       {:text (:text out)})))))
 
 (defn- invoke!
   "The /hive invoke <panel> <verb> <row?> command: routes the invoke to the
@@ -92,7 +96,7 @@
    or {:text .. :prompt ..}."
   ([ports config ctx] (run-command (lens/builtin-registry) ports config ctx))
   ([registry ports config ctx]
-   (let [{:keys [action status scope reason query message lens panel verb row]}
+   (let [{:keys [action reason query message panel verb row]}
          (d/parse-command ctx)]
      (case action
        :help    {:text d/usage}
@@ -181,9 +185,9 @@
   p/IAddon
   (addon-id [_] addon-id-str)
   (addon-type [_] :native)
-  (capabilities [_] #{:tools :health-reporting :dirge/hooks :dirge/commands :dirge/command-hooks :dirge/panels})
+  (capabilities [_] #{:tools :health-reporting :dirge/hooks :dirge/commands :dirge/command-hooks :dirge/panels :dirge/lenses})
   (initialize! [_ config]
-    (reset! state {:config (d/resolve-config config) :initialized? true})
+    (swap! state assoc :config (d/resolve-config config) :initialized? true)
     {:success? true :errors [] :metadata {:addon/id addon-id-str}})
   (shutdown! [_]
     (swap! state assoc :initialized? false)
@@ -204,6 +208,11 @@
      :dirge/commands      {"hive" {:description "hive: catchup | wrap | kanban [status] | swarm [scope] | lens [name] | memory <query> | shout <message>"
                                    :handler     (fn [ctx]
                                                   (run-command registry ports (current-config state) ctx))}}
+     :dirge/lenses        (fn [] (vec (lens/list-lenses registry)))
+     :dirge/register-lenses! (fn [lenses]
+                               (swap! (:lens-registry @state)
+                                      #(lens/with-builtins % lenses))
+                               nil)
      :dirge/invoke        (fn [{:keys [panel verb row payload] :or {payload {}}}]
                             ;; The in-dirge half of invoke routing: the lens
                             ;; registry owns the panel ids, so the verb runs
@@ -215,10 +224,11 @@
                                                                       :row row
                                                                       :payload payload})]
                               (if (:invoke/routed routed)
-                                ((:effects routed) ports)
-                                (when-let [log! (:log! ports)]
-                                  (log! :warn (str "hive invoke ignored: " verb
-                                                   " on " panel))))))
+                                (do ((:effects routed) ports) true)
+                                (do (when-let [log! (:log! ports)]
+                                      (log! :warn (str "hive invoke ignored: " verb
+                                                       " on " panel)))
+                                    false))))
      :dirge/command-hooks {"guard" (fn [ctx] (guard-hook ports (current-config state) ctx))}}))
 
 (defn make-addon
@@ -227,7 +237,9 @@
    hive-dirge.lens.registry/with-builtins."
   ([ports] (make-addon ports (lens/builtin-registry)))
   ([ports registry]
-   (->HiveDirgeAddon (atom {:config nil :initialized? false}) ports registry)))
+   (let [live (atom registry)]
+     (->HiveDirgeAddon (atom {:config nil :initialized? false :lens-registry live})
+                       ports (fn [] (@live))))))
 
 (defn addon-ctor
   "Manifest :addon/init-fn: config -> uninitialized IAddon bound to

@@ -23,6 +23,7 @@
    Anything else parses to an {:reply/error ..} value, is recorded and is
    answered 400 at once."
   (:require [clojure.string :as str]
+            [hive-dirge.lens.registry :as lens]
             [hive-vessel.wire :as wire]))
 
 ;; SPDX-License-Identifier: MIT
@@ -54,13 +55,16 @@
 (defn discovery-doc
   "The discovery document (string keys, JSON-ready). It carries the token, so
    it is only ever written to a 0600 file and never logged."
-  [{:keys [port token pid]}]
+  [{:keys [port token pid lenses]}]
   (cond-> {"vessel" (name vessel-id)
            "dialect" (name dialect)
            "url" (base-url port)
            "port" port
            "token" token}
-    pid (assoc "pid" pid)))
+    pid (assoc "pid" pid)
+    lenses (assoc "capabilities" (merge {"version" 1
+                                          "replies" ["focus" "unfocus" "next-tab" "prev-tab" "refresh" "invoke"]}
+                                          (lens/capabilities-fragment lenses)))))
 
 (defn discovery-json [info] (wire/write-json (discovery-doc info)))
 

@@ -1,1 +1,2 @@
-{:lint-as {clojure.test.check.clojure-test/defspec clojure.core/def}}
+{:lint-as {clojure.test.check.clojure-test/defspec clojure.core/def
+           hive-dirge.host-test/with-host clojure.core/let}}

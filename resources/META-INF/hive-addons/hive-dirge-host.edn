@@ -9,7 +9,7 @@
  ;; Soft edge: mount after whatever offers :olympus (hive.olympus) so its
  ;; instance is injected under :mount/dependencies for /reply routing. When
  ;; no olympus is present the vessel still mounts; replies record an error.
- :addon/requires-capabilities #{:olympus}
+ :addon/requires-capabilities #{:olympus :dirge/lenses}
  :addon/description  "dirge vessel: serves hive-vessel :json natives to dirge over a loopback, token-gated SSE bridge (discovery file $XDG_RUNTIME_DIR/hive-vessel/dirge.json) and routes dirge key replies to hive.olympus"
  :addon/maturity     :experimental
  :addon/trust-class  :foss}

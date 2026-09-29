@@ -16,9 +16,9 @@
     (is (= :all (:hive/swarm-scope (d/resolve-config {:hive/swarm-scope " "}))))))
 
 (deftest swarm-parse
-  (is (= {:action :lens :lens "swarm"} (d/parse-command {:argv ["swarm"]})))
-  (is (= {:action :lens :lens "swarm" :scope :project} (d/parse-command {:args "swarm project"})))
-  (is (= {:action :lens :lens "swarm" :scope "hive-mcp"} (d/parse-command {:args "swarm hive-mcp"}))))
+  (is (= {:action :lens :lens "swarm" :args []} (d/parse-command {:argv ["swarm"]})))
+  (is (= {:action :lens :lens "swarm" :args ["project"]} (d/parse-command {:args "swarm project"})))
+  (is (= {:action :lens :lens "swarm" :args ["hive-mcp"]} (d/parse-command {:args "swarm hive-mcp"}))))
 
 (deftest swarm-request-lists-all-by-default
   (testing "default scope sends no project_id and the registry-wide agent_id"
@@ -45,7 +45,7 @@
                                     {:id "b" :status "blocked"} {:id "a" :status "working"}]))))
   (is (= [] (d/working-first nil)))
   (testing "scope parsing keeps working next to memory and shout"
-    (is (= {:action :lens :lens "swarm" :scope :all} (d/parse-command {:args "swarm all"})))
+    (is (= {:action :lens :lens "swarm" :args ["all"]} (d/parse-command {:args "swarm all"})))
     (is (= {:action :memory :query "swarm"} (d/parse-command {:args "memory swarm"})))))
 
 (deftest swarm-panel-and-summary

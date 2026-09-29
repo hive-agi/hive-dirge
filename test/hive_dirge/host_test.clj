@@ -11,6 +11,8 @@
             [hive-addon.mount.port :as mount-port]
             [hive-addon.protocol :as addon]
             [hive-dirge.host :as host]
+            [hive-dirge.hive.addon :as hive-addon]
+            [hive-dirge.lens.registry :as lens]
             [hive-dirge.host.boundary :as boundary]
             [hive-dirge.host.domain :as domain]
             [hive-dirge.host.ports :as ports]
@@ -130,6 +132,17 @@
   (is (= {:command :olympus/next-tab} (domain/parse-reply "{\"action\":\"next-tab\"}")))
   (is (= :reply/missing-target (:reply/error (domain/parse-reply "{\"action\":\"focus\"}"))))
   (is (= :reply/unknown-action (:reply/error (domain/parse-reply "{\"action\":\"rm -rf\"}"))))
+  (is (= {:command :invoke
+          :invoke  {"panel" "kanban" "verb" "open" "row" "t1" "payload" {}}}
+         (domain/parse-reply "{\"action\":\"invoke\",\"panel\":\"kanban\",\"verb\":\"open\",\"row\":\"t1\"}")))
+  (is (= {:command :invoke
+          :invoke  {"panel" "swarm" "verb" "focus" "row" nil "payload" {"k" 1}}}
+         (domain/parse-reply "{\"action\":\"invoke\",\"panel\":\"swarm\",\"verb\":\"focus\",\"payload\":{\"k\":1}}"))
+      "payload defaults to {}, a missing row is nil")
+  (is (= :reply/malformed-invoke
+         (:reply/error (domain/parse-reply "{\"action\":\"invoke\",\"panel\":\"kanban\"}"))))
+  (is (= :reply/malformed-invoke
+         (:reply/error (domain/parse-reply "{\"action\":\"invoke\",\"panel\":\"\",\"verb\":\"open\"}"))))
   (is (= :reply/unparseable (:reply/error (domain/parse-reply "{not json"))))
   (is (= :reply/not-an-object (:reply/error (domain/parse-reply "[1]")))))
 
@@ -142,7 +155,33 @@
     (ports/route! o {:command :olympus/prev-tab})
     (ports/route! o {:command :olympus/refresh})
     (is (= {:reply/error :reply/unparseable} (ports/route! o {:reply/error :reply/unparseable})))
-    (is (= [[:focus "a"] [:focus nil] [:next-tab] [:prev-tab] [:refresh]] @(:calls o)))))
+    (is (= [[:focus "a"] [:focus nil] [:next-tab] [:prev-tab] [:refresh]] @(:calls o))))
+  (testing "an invoke routes through the InvokeRouter, never the olympus port"
+    (let [o    (recording)
+          runs (atom [])
+          router (boundary/registry-invoke-router
+                  {:registry-fn (constantly (lens/make-registry []))
+                   :config      {:mount/dependencies {}}
+                   :verb-fn     (fn [panel verb]
+                                  (when (= ["kanban" "open"] [panel verb])
+                                    (fn [invoke] (swap! runs conj invoke))))
+                   :warn!       (fn [_ _])})]
+      (is (= {:routed :invoke :result true}
+             (ports/route! o router {:command :invoke
+                                     :invoke {"panel" "kanban" "verb" "open"
+                                              "row" "t1" "payload" {}}})))
+      (is (= [{"panel" "kanban" "verb" "open" "row" "t1" "payload" {}}] @runs))
+      (is (= {:routed :invoke :result false}
+             (ports/route! o router {:command :invoke
+                                     :invoke {"panel" "kanban" "verb" "nope"
+                                              "row" nil "payload" {}}}))
+          "an unknown verb is ignored with a warning, not a wire error")
+      (is (= {:routed :invoke :result false}
+             (ports/route! o router {:command :invoke
+                                     :invoke {"panel" "ghost" "verb" "open"
+                                              "row" nil "payload" {}}}))
+          "an unknown panel is ignored with a warning")
+      (is (= [] @(:calls o)) "olympus is untouched by invokes"))))
 
 ;; =============================================================================
 ;; Discovery file
@@ -436,3 +475,59 @@
         (is (= "retry: 2000" (next-line q)))
         (is (= "" (next-line q)))
         (is (= ": ping" (next-line q)))))))
+
+
+(def lens-calls (atom []))
+
+(defn lens-stub-ctor [_]
+  (hive-addon/make-addon
+   {:mcp-call (fn [_server _tool _args]
+                {:content [{:type "text" :text "ROWS"}]})
+    :json-parse (fn [_] [{:id "task-42" :title "Task" :status "todo"
+                           :priority "high" :project "proj"}])
+    :panel! (fn [op] (swap! lens-calls conj op) true)
+    :log! (fn [level msg] (swap! lens-calls conj [level msg]))
+    :cwd (constantly "/w/proj")}))
+
+(deftest mounted-kanban-lens-wire
+  (reset! lens-calls [])
+  (let [path (temp-discovery)
+        specs [(update (manifest "hive-dirge-host.edn") :addon/config assoc
+                       :dirge/discovery-path path :dirge/heartbeat-ms 100)
+               {:addon/id "hive.dirge" :addon/type :native
+                :addon/init-ns "hive-dirge.host-test" :addon/init-fn "lens-stub-ctor"
+                :addon/capabilities #{:dirge/lenses}}]
+        mounted (mount/atom-mount-host)
+        report (mount/mount! (mount/solve specs) mounted {:license-gate (constantly nil)})]
+    (try
+      (is (:ok? report) (pr-str report))
+      (is (= ["hive.dirge" "hive.dirge.host"] (:order report)))
+      (let [discovered (discovery path)
+            caps (get discovered "capabilities")
+            q (open-events discovered)
+            addon-instance (mount-port/registered mounted "hive.dirge")
+            dirge-host (mount-port/registered mounted "hive.dirge.host")]
+        (is (= 1 (get caps "version")))
+        (is (some #{"invoke"} (get caps "replies")))
+        (is (= ["focus" "open"] (get caps "invokes")))
+        (is (= {"invoke" "open"} (get-in caps ["keys" "enter"])))
+        (is (= "retry: 2000" (next-line q)))
+        ((get-in (addon/hooks addon-instance) [:dirge/commands "hive" :handler])
+         {:argv ["kanban"] :cwd "/w/proj"})
+        (let [op (first @lens-calls)
+              dispatch! (:vessel/dispatch! (addon/hooks dirge-host))]
+          (is (= "kanban" (:panel/id op)))
+          (is (contains? (dispatch! op) :ok))
+          (let [frame (read-frame q)
+                data (wire/read-json (get frame "data"))]
+            (is (= "ui/show-panel" (get data "op")))
+            (is (= "kanban" (get data "panel/id")))
+            (is (= true (get-in data ["cursor"])))
+            (is (= {"invoke" "open"} (get-in data ["keys" "enter"])))
+            (is (some #(= "task-42" (get % "id")) (get data "lines")))))
+        (is (= 202 (post-reply discovered
+                               "{\"action\":\"invoke\",\"panel\":\"kanban\",\"verb\":\"open\",\"row\":\"task-42\",\"payload\":{}}")))
+        (is (eventually #(some #{[:info "kanban open task-42"]} @lens-calls)))
+        (is (= 202 (post-reply discovered "{\"action\":\"next-tab\"}"))))
+      (finally
+        (mount/teardown! mounted (:order report))))))

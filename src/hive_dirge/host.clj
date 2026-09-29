@@ -29,7 +29,9 @@
             [hive-dirge.host.boundary :as boundary]
             [hive-dirge.host.domain :as domain]
             [hive-dirge.host.ports :as ports]
-            [hive-vessel.core :as v]))
+            [hive-vessel.core :as v]
+            [hive-vessel.dialect.json :as json]
+            [hive-vessel.wire :as wire]))
 
 ;; SPDX-License-Identifier: MIT
 
@@ -40,6 +42,13 @@
           (when (addon/addon? dep)
             (try (addon/hooks dep) (catch Throwable _ nil))))
         (:mount/dependencies config)))
+
+(defn- register-external-lenses! [config]
+  (when-let [hive (get (:mount/dependencies config) "hive.dirge")]
+    (when (addon/addon? hive)
+      (when-let [register! (:dirge/register-lenses! (addon/hooks hive))]
+        (register! (boundary/dependency-lenses
+                    (update config :mount/dependencies dissoc "hive.dirge")))))))
 
 (defn- olympus-port [config]
   (or (:dirge/olympus config)
@@ -53,8 +62,8 @@
 (defn- run-command-fn
   "What the worker applies to each queued command: route it through OLYMPUS
    and record the outcome."
-  [state olympus]
-  (fn [command] (record! state (ports/route! olympus command))))
+  [state olympus router]
+  (fn [command] (record! state (ports/route! olympus router command))))
 
 (defn- action-queue [config run-command]
   (if-let [make (:dirge/action-queue config)]
@@ -82,7 +91,12 @@
             token (boundary/new-token)
             path (or (:dirge/discovery-path config)
                      (domain/discovery-path (System/getenv "XDG_RUNTIME_DIR")))
-            queue (action-queue config (run-command-fn state (olympus-port config)))
+            lenses (do (register-external-lenses! config)
+                       (boundary/dependency-registry config))
+            router (boundary/registry-invoke-router
+                    {:registry-fn (fn [] (boundary/dependency-registry config))
+                     :config config})
+            queue (action-queue config (run-command-fn state (olympus-port config) router))
             bridge (boundary/start-bridge! {:port (:dirge/port config)
                                             :token token
                                             :heartbeat-ms (:dirge/heartbeat-ms config)
@@ -90,8 +104,24 @@
         (try
           (boundary/write-private! path (domain/discovery-json
                                          {:port (:port bridge) :token token
-                                          :pid (.pid (java.lang.ProcessHandle/current))}))
-          (let [registry (atom (v/registry-from-hooks (dependency-hooks config)))
+                                          :pid (.pid (java.lang.ProcessHandle/current))
+                                          :lenses lenses}))
+          (let [registry (atom (v/register
+                                (v/registry-from-hooks (dependency-hooks config))
+                                {:translator/id :hive-dirge/lens-panel
+                                 :translator/op :ui/show-panel
+                                 :translator/priority 1
+                                 :translator/when {:vessel/id :dirge}
+                                 :translator/translate
+                                 (fn [op _]
+                                   (let [message (json/show-panel-message op)
+                                         rows (:panel/rows op)]
+                                     (json/native
+                                      (if (seq rows)
+                                        (assoc message "lines"
+                                               (wire/->json-data
+                                                (into [{:text (get-in op [:doc :doc/title]) :face :title}] rows)))
+                                        message))))}))
                 target (domain/target (boundary/executor bridge))]
             (swap! state assoc
                    :lifecycle :active :bridge bridge :queue queue :discovery path

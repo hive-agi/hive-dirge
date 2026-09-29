@@ -207,16 +207,31 @@
 ;; Invoke routing: the lens registry decides, the owning side runs the verb
 ;; =============================================================================
 
-(defn- dependency-invoke-hooks
-  "The :dirge/invoke fns of every mounted addon in CONFIG's
-   :mount/dependencies, resolved at call time. The first that accepts (does
-   not throw and answers truthy) owns the invoke."
+(defn dependency-lenses
+  "Collect lens contributions from mounted IAddons' :dirge/lenses hooks."
   [config]
-  (keep (fn [[_ dep]]
+  (mapcat (fn [[_ dep]]
+            (when (addon/addon? dep)
+              (try (let [value (get (addon/hooks dep) :dirge/lenses)]
+                     (cond (fn? value) (value)
+                           (sequential? value) value))
+                   (catch Throwable _ nil))))
+          (:mount/dependencies config)))
+
+(defn dependency-registry [config]
+  (lens/with-builtins (lens/builtin-registry) (dependency-lenses config)))
+
+(defn- owner-invoke-hook [config panel]
+  (some (fn [[_ dep]]
           (when (addon/addon? dep)
-            (try (when-let [f (get (addon/hooks dep) :dirge/invoke)] f)
+            (try (let [hooks (addon/hooks dep)
+                       offered (:dirge/lenses hooks)
+                       lenses (if (fn? offered) (offered) offered)]
+                   (when (and (some #(= panel (:lens/panel %)) lenses)
+                              (fn? (:dirge/invoke hooks)))
+                     (:dirge/invoke hooks)))
                  (catch Throwable _ nil))))
-        (:mount/dependencies config)))
+        (sort-by (fn [[id _]] (= id "hive.dirge")) (:mount/dependencies config))))
 
 (defn registry-invoke-router
   "An InvokeRouter over REGISTRY-FN (0-arity, a hive-dirge.lens.registry
@@ -238,19 +253,19 @@
             owner (when reg (lens/owner-of reg panel))]
         (cond
           owner
-          (let [hook (first (dependency-invoke-hooks config))]
-            (if hook
+          (let [hook (owner-invoke-hook config panel)]
+            (if (and hook (lens/known-verb? owner verb))
               (try
-                (hook invoke)
-                true
+                (boolean (hook {:panel panel :verb verb :row (get invoke "row")
+                       :payload (get invoke "payload" {})}))
                 (catch Throwable t
                   (warn! :warn (str "hive invoke: " verb " on " panel
                                    " failed: " (ex-message t)))
+                  false))
+              (do (warn! :warn (str "hive invoke: unsupported verb or missing :dirge/invoke hook for lens "
+                                   (:lens/id owner) "; ignored " verb " on " panel))
                   false)))
-            (do (warn! :warn (str "hive invoke: no :dirge/invoke hook for lens "
-                                 (:lens/id owner) "; ignored " verb " on " panel))
-                false))
-          (and reg (ifn? verb-fn))
+          (ifn? verb-fn)
           (if-let [run (verb-fn panel verb)]
             (try
               (run invoke)
