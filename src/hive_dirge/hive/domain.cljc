@@ -236,6 +236,42 @@
         marker (re-find #"\n+---[A-Z][A-Z-]*---" text)]
     (str/trim (if marker (subs text 0 (str/index-of text marker)) text))))
 
+;; ---------------------------------------------------------------------------
+;; Guard: dirge command hooks judged by hive's guard seam
+
+(def guard-deadline-ms
+  "How long hive's guard may take on one hook before the moment is allowed
+   unjudged. Inside the hook entry's own timeout, so the guard's fail-open
+   answer arrives before dirge gives up on the entry."
+  5000)
+
+(defn guard-request
+  "mcp-call triple asking hive's guard to judge one dirge hook `payload`
+   (Claude hook JSON) through its :dirge projection."
+  [config payload]
+  [(:hive/server config) "guard"
+   {"command"     "decide"
+    "harness"     "dirge"
+    "payload"     payload
+    "deadline_ms" guard-deadline-ms}])
+
+(defn guard-answer
+  "The hook answer in the guard tool's mcp-call `answer`, read with
+   `json-parse`: {:answer claude-hook-json :gap why-or-nil}.
+   FAIL-OPEN: an unreachable server, a refused or failed call, unreadable
+   text and a guard gap all answer {} (no verdict, the action allowed), with
+   the reason under :gap."
+  [answer json-parse]
+  (if-let [err (result-error answer)]
+    {:answer {} :gap err}
+    (let [parsed (json-parse (answer-body (result-text answer)))
+          hook   (when (map? parsed) (:answer parsed))
+          gap    (when (map? parsed) (some-> (:gap parsed) str))]
+      (cond
+        (not (map? parsed)) {:answer {} :gap "unreadable guard answer"}
+        (not (map? hook))   {:answer {} :gap (or gap "the guard answered no hook JSON")}
+        :else               {:answer hook :gap gap}))))
+
 (defn truncate
   "`s` cut to at most `n` characters, with a marker saying how much was
    dropped."
