@@ -9,7 +9,7 @@
         io.github.hive-agi/hive-dsl {:mvn/version "0.5.31"}
 
         ;; hive.dirge.host: the :json dialect, registry and SSE executor.
-        io.github.hive-agi/hive-vessel {:mvn/version "0.1.12"}
+        io.github.hive-agi/hive-vessel {:mvn/version "0.1.14"}
 
         ;; hive.olympus.dirge: the manifest's init-ns is hive-olympus.harness.
         io.github.hive-agi/hive-olympus {:mvn/version "0.1.11"}}

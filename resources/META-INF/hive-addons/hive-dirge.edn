@@ -13,7 +13,7 @@
  ;; "dirge addon session hooks"; older dirge ignores the two hooks and
  ;; /hive catchup and /hive wrap stay available by hand.
  :dirge/requires     {:session-hooks "dirge addon session hooks"}
- :addon/capabilities #{:tools :health-reporting :dirge/hooks :dirge/commands :dirge/panels}
+ :addon/capabilities #{:tools :health-reporting :dirge/hooks :dirge/commands :dirge/panels :dirge/lenses}
  :addon/dependencies #{}
  :addon/description  "hive inside dirge: automatic catchup at session start and wrap at exit, /hive catchup, wrap, kanban, memory, swarm and shout commands, hive memory search and kanban tools, over dirge's MCP connection to the configured hive server."
  :addon/maturity     :experimental

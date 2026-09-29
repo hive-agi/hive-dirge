@@ -16,9 +16,9 @@
     (is (= :all (:hive/swarm-scope (d/resolve-config {:hive/swarm-scope " "}))))))
 
 (deftest swarm-parse
-  (is (= {:action :swarm} (d/parse-command {:argv ["swarm"]})))
-  (is (= {:action :swarm :scope :project} (d/parse-command {:args "swarm project"})))
-  (is (= {:action :swarm :scope "hive-mcp"} (d/parse-command {:args "swarm hive-mcp"}))))
+  (is (= {:action :lens :lens "swarm" :args []} (d/parse-command {:argv ["swarm"]})))
+  (is (= {:action :lens :lens "swarm" :args ["project"]} (d/parse-command {:args "swarm project"})))
+  (is (= {:action :lens :lens "swarm" :args ["hive-mcp"]} (d/parse-command {:args "swarm hive-mcp"}))))
 
 (deftest swarm-request-lists-all-by-default
   (testing "default scope sends no project_id and the registry-wide agent_id"
@@ -45,7 +45,7 @@
                                     {:id "b" :status "blocked"} {:id "a" :status "working"}]))))
   (is (= [] (d/working-first nil)))
   (testing "scope parsing keeps working next to memory and shout"
-    (is (= {:action :swarm :scope :all} (d/parse-command {:args "swarm all"})))
+    (is (= {:action :lens :lens "swarm" :args ["all"]} (d/parse-command {:args "swarm all"})))
     (is (= {:action :memory :query "swarm"} (d/parse-command {:args "memory swarm"})))))
 
 (deftest swarm-panel-and-summary
@@ -53,8 +53,8 @@
               {:id "l2" :status "idle" :project-id nil}]
         p    (d/swarm-panel rows "" :all)]
     (is (= {:op :show :id "hive-swarm" :title "hive swarm (all)"} (dissoc p :lines)))
-    (is (= [{:text "l1  working  hive-dirge" :face "normal"}
-            {:text "l2  idle  -" :face "dim"}]
+    (is (= [{:text "l1  working  hive-dirge" :id "l1" :face "normal"}
+            {:text "l2  idle  -" :id "l2" :face "dim"}]
            (:lines p)))
     (is (= "hive swarm: 2 agents, 1 working (side panel)" (d/swarm-summary rows))))
   (is (= [{:text "no agents" :face "dim"}] (:lines (d/swarm-panel [] "" :project))))
