@@ -8,6 +8,7 @@
             [hive-addon.protocol :as addon]
             [hive-dirge.host.domain :as domain]
             [hive-dirge.host.ports :as ports]
+            [hive-dirge.lens.registry :as lens]
             [hive-vessel.executor.sse :as sse])
   (:import (com.sun.net.httpserver HttpExchange HttpHandler HttpServer)
            (java.io InputStream)
@@ -201,3 +202,65 @@
    seen by the next reply."
   [hooks-fn]
   (->HooksOlympus hooks-fn))
+
+;; =============================================================================
+;; Invoke routing: the lens registry decides, the owning side runs the verb
+;; =============================================================================
+
+(defn- dependency-invoke-hooks
+  "The :dirge/invoke fns of every mounted addon in CONFIG's
+   :mount/dependencies, resolved at call time. The first that accepts (does
+   not throw and answers truthy) owns the invoke."
+  [config]
+  (keep (fn [[_ dep]]
+          (when (addon/addon? dep)
+            (try (when-let [f (get (addon/hooks dep) :dirge/invoke)] f)
+                 (catch Throwable _ nil))))
+        (:mount/dependencies config)))
+
+(defn registry-invoke-router
+  "An InvokeRouter over REGISTRY-FN (0-arity, a hive-dirge.lens.registry
+   registry) and the mounted addons' :dirge/invoke hooks from CONFIG.
+
+   The lens registry owns the panel ids: when it names the owner, the invoke
+   is re-routed over the owning addon's :dirge/invoke hook (the verbs run
+   in-dirge). Otherwise the host owns the panel; VERB-FN (fn [panel verb] ->
+   (fn [invoke]) or nil) runs it when it knows the verb. An unknown panel or
+   verb is ignored with a warning, never an error. Every lookup resolves at
+   call time, so a hive.dirge that mounts later is seen by the next reply."
+  [{:keys [registry-fn config verb-fn warn!]}]
+  (let [warn! (or warn! (fn [_level msg] (binding [*out* *err*] (println msg))))]
+   (reify ports/InvokeRouter
+    (route-invoke! [_ {:keys [invoke] :as _cmd}]
+      (let [panel (get invoke "panel")
+            verb  (get invoke "verb")
+            reg   (when registry-fn (registry-fn))
+            owner (when reg (lens/owner-of reg panel))]
+        (cond
+          owner
+          (let [hook (first (dependency-invoke-hooks config))]
+            (if hook
+              (try
+                (hook invoke)
+                true
+                (catch Throwable t
+                  (warn! :warn (str "hive invoke: " verb " on " panel
+                                   " failed: " (ex-message t)))
+                  false)))
+            (do (warn! :warn (str "hive invoke: no :dirge/invoke hook for lens "
+                                 (:lens/id owner) "; ignored " verb " on " panel))
+                false))
+          (and reg (ifn? verb-fn))
+          (if-let [run (verb-fn panel verb)]
+            (try
+              (run invoke)
+              true
+              (catch Throwable t
+                (warn! :warn (str "hive invoke: " verb " on " panel
+                                 " failed: " (ex-message t)))
+                false))
+            (do (warn! :warn (str "hive invoke: unknown verb " verb " on " panel "; ignored"))
+                false))
+          :else
+          (do (warn! :warn (str "hive invoke: unknown panel " panel "; ignored " verb))
+              false)))))))

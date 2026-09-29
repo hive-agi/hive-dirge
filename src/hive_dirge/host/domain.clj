@@ -9,9 +9,17 @@
      {\"action\": \"next-tab\"}
      {\"action\": \"prev-tab\"}
      {\"action\": \"refresh\"}
+     {\"action\": \"invoke\", \"panel\": \"<panel id>\", \"verb\": \"<verb>\",
+      \"row\": \"<row id or null>\", \"payload\": {...}}        a lens verb
 
-   A well-formed reply is answered 202 as soon as it is queued; the olympus
-   action runs afterwards and its re-render reaches dirge on the SSE stream.
+   The five olympus actions route to the IOlympusControl port, unchanged.
+   An invoke routes to the InvokeRouter port when one is installed (it holds
+   the lens registry); an unknown panel or verb is the router's own
+   ignore-and-warn decision, never a wire error, so dirge keeps its defaults
+   as C3 specifies.
+
+   A well-formed reply is answered 202 as soon as it is queued; the action
+   runs afterwards and its re-render reaches dirge on the SSE stream.
    Anything else parses to an {:reply/error ..} value, is recorded and is
    answered 400 at once."
   (:require [clojure.string :as str]
@@ -69,16 +77,22 @@
 ;; =============================================================================
 
 (def actions
-  "Wire action -> command keyword."
+  "Wire action -> command keyword. The five olympus actions are the closed
+   set routed to the IOlympusControl port."
   {"focus" :olympus/focus
    "unfocus" :olympus/unfocus
    "next-tab" :olympus/next-tab
    "prev-tab" :olympus/prev-tab
    "refresh" :olympus/refresh})
 
+(def invoke-action
+  "The wire action carrying a lens verb invocation."
+  "invoke")
+
 (defn message->command
   "A parsed reply MESSAGE (string-keyed map) as a command value:
-   {:command kw} plus :agent-id for :olympus/focus, or {:reply/error reason}."
+   {:command kw} plus :agent-id for :olympus/focus, :invoke fields for the
+   invoke action, or {:reply/error reason}."
   [message]
   (if-not (map? message)
     {:reply/error :reply/not-an-object}
@@ -86,7 +100,19 @@
           command (get actions action)
           target (get message "target")]
       (cond
-        (nil? command) {:reply/error :reply/unknown-action :reply/action action}
+        (nil? command)
+        (if (= invoke-action action)
+          (let [panel (get message "panel")
+                verb  (get message "verb")]
+            (if (and (string? panel) (not (str/blank? panel))
+                     (string? verb) (not (str/blank? verb)))
+              {:command :invoke
+               :invoke  {"panel"   panel
+                         "verb"    verb
+                         "row"     (get message "row")
+                         "payload" (or (get message "payload") {})}}
+              {:reply/error :reply/malformed-invoke :reply/action action}))
+          {:reply/error :reply/unknown-action :reply/action action})
         (= :olympus/focus command)
         (if (and (string? target) (not (str/blank? target)))
           {:command command :agent-id target}
