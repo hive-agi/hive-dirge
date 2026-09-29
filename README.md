@@ -33,7 +33,9 @@ server (`mcp_servers.hive` in dirge's `config.json`), dirge gains:
 | `/hive catchup` | runs the project catchup and hands it to the model as the next prompt |
 | `/hive wrap` | records a hive session wrap for this project |
 | `/hive kanban [todo\|inprogress\|inreview\|done]` | this project's tasks in a side panel |
-| `/hive swarm [all\|project\|<project-id>]` | hive agents and their status in a side panel |
+| `/hive memory <query>` | semantic search over hive memory, hits in the chat |
+| `/hive swarm [all\|project\|<project-id>]` | hive agents and their status, working ones first, in a side panel |
+| `/hive shout <message>` | posts progress to the hivemind |
 
 The model also gets two tools, `hive_memory_search` and `hive_kanban_list`, and
 a system-prompt note naming the commands. Everything calls hive-mcp through

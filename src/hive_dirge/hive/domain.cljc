@@ -76,7 +76,9 @@
   (str "/hive catchup          load hive session context (memory, kanban, git) into the next turn\n"
        "/hive wrap             record a hive session wrap for this project\n"
        "/hive kanban [status]  show the project kanban in a side panel (status: todo, inprogress, inreview, done)\n"
-       "/hive swarm [scope]    show hive agents in a side panel (scope: all, project, or a project id)"))
+       "/hive memory <query>   search hive memory; hits listed in the chat\n"
+       "/hive swarm [scope]    hive agents, working ones first, in a side panel (scope: all, project, or a project id)\n"
+       "/hive shout <message>  post progress to the hivemind"))
 
 (defn- words
   [s]
@@ -87,11 +89,12 @@
 (defn parse-command
   "The /hive invocation as an action map. `ctx` is dirge's command context
    {:args :argv :cwd}; :argv wins over :args when both are present.
-   Answers {:action :catchup|:wrap|:kanban|:help|:unknown ...}."
+   Answers {:action :catchup|:wrap|:kanban|:memory|:swarm|:shout|:help|:unknown ...}."
   [ctx]
   (let [argv (let [v (:argv ctx)]
                (if (and (sequential? v) (seq v)) (vec (map str v)) (words (:args ctx))))
-        [sub & more] argv]
+        [sub & more] argv
+        text (str/join " " more)]
     (case sub
       nil       {:action :help}
       "help"    {:action :help}
@@ -106,6 +109,12 @@
       "swarm"   (if-let [scope (first more)]
                   {:action :swarm :scope (resolve-swarm-scope scope)}
                   {:action :swarm})
+      "memory"  (if (str/blank? text)
+                  {:action :unknown :reason "usage: /hive memory <query>"}
+                  {:action :memory :query text})
+      "shout"   (if (str/blank? text)
+                  {:action :unknown :reason "usage: /hive shout <message>"}
+                  {:action :shout :message text})
       {:action :unknown :reason (str "unknown /hive subcommand: " sub)})))
 
 ;; ---------------------------------------------------------------------------
@@ -187,6 +196,16 @@
      (cond-> {"command" "agent status" "agent_id" swarm-all-agent-id}
        project (assoc "project_id" project))]))
 
+(defn shout-request
+  "mcp-call triple posting `message` to the hivemind as progress from dirge."
+  [config directory message]
+  [(:hive/server config) "swarm"
+   (with-directory {"command"    "hivemind shout"
+                    "event_type" "progress"
+                    "task"       "dirge"
+                    "message"    message}
+     directory)])
+
 ;; ---------------------------------------------------------------------------
 ;; MCP result shaping
 
@@ -207,6 +226,15 @@
   [answer]
   (str/join "\n" (keep (fn [c] (when (string? (:text c)) (:text c)))
                        (:content answer))))
+
+(defn answer-body
+  "The answer part of an MCP result text. hive appends context blocks
+   (---MEMORY--- and the like) after the answer, which no JSON reader
+   accepts; they are cut off here."
+  [text]
+  (let [text   (str text)
+        marker (re-find #"\n+---[A-Z][A-Z-]*---" text)]
+    (str/trim (if marker (subs text 0 (str/index-of text marker)) text))))
 
 (defn truncate
   "`s` cut to at most `n` characters, with a marker saying how much was
@@ -346,6 +374,21 @@
            " (side panel)"))))
 
 ;; ---------------------------------------------------------------------------
+;; Memory hits -> chat
+
+(defn memory-text
+  "Chat text for a parsed memory search answer {:results [{:id :type :title}]}."
+  [query data]
+  (let [hits (:results data)]
+    (if (seq hits)
+      (str/join "\n"
+                (cons (str (count hits) " memories for \"" query "\"")
+                      (map (fn [{:keys [id type title]}]
+                             (str "  [" type "] " title "  (" id ")"))
+                           hits)))
+      (str "no memories for \"" query "\""))))
+
+;; ---------------------------------------------------------------------------
 ;; Swarm agents -> side panel
 
 (defn swarm-rows
@@ -357,6 +400,14 @@
     (sequential? (:agents data))    (vec (filter map? (:agents data)))
     (map? (:agent data))            [(:agent data)]
     :else nil))
+
+(defn working-first
+  "Agent `rows` with working ones first, each group ordered by id."
+  [rows]
+  (let [working? #(= "working" (:status %))
+        by-id    #(sort-by (comp str :id) %)]
+    (vec (concat (by-id (filter working? rows))
+                 (by-id (remove working? rows))))))
 
 (defn- agent-project
   [row]
@@ -388,14 +439,14 @@
          :else "")))
 
 (defn swarm-panel
-  "A dirge panel :show op listing agent `rows`. With nil rows (unparsable
-   answer) the raw `text` is shown as markdown."
+  "A dirge panel :show op listing agent `rows`, working ones first. With nil
+   rows (unparsable answer) the raw `text` is shown as markdown."
   [rows text scope]
   (if (nil? rows)
     {:op :show :id "hive-swarm" :title (swarm-title scope) :markdown text}
     {:op :show :id "hive-swarm" :title (swarm-title scope)
      :lines (if (seq rows)
-              (mapv swarm-line rows)
+              (mapv swarm-line (working-first rows))
               [{:text "no agents" :face "dim"}])}))
 
 (defn swarm-summary
@@ -433,7 +484,8 @@
                 " and a session wrap is recorded at exit")
               ". The user can run /hive wrap (record a session wrap), ")
          "The user can run /hive catchup (load hive memory and kanban context), /hive wrap (record a session wrap), ")
-       "/hive kanban [status] (show tasks in the side panel) and /hive swarm "
-       "[scope] (show hive agents in the side panel). You can call the "
+       "/hive kanban [status] and /hive swarm [scope] (side panels), "
+       "/hive memory <query> and /hive shout <message>, none of which spends "
+       "a turn. You can call the "
        "hive_memory_search and hive_kanban_list tools to consult hive memory "
        "and the project kanban."))

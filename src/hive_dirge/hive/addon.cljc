@@ -1,9 +1,9 @@
 (ns hive-dirge.hive.addon
   "hive.dirge: the in-dirge IAddon that connects a dirge session to hive over
    dirge's own MCP connection. Contributes the /hive command family
-   (catchup, wrap, kanban, swarm), two tools proxying hive memory search and the
-   kanban list, a static system-prompt hook, and the session hooks that run
-   catchup at session start and wrap at session end.
+   (catchup, wrap, kanban, memory, swarm, shout), two tools proxying hive
+   memory search and the kanban list, a static system-prompt hook, and the
+   session hooks that run catchup at session start and wrap at session end.
 
    Effects go through a ports map {:mcp-call :json-parse :panel! :cwd} so the
    pipeline is testable with plain fns; `harness-ports` binds them to
@@ -32,17 +32,29 @@
 ;; ---------------------------------------------------------------------------
 ;; /hive command pipeline
 
+(defn- body
+  "The answer text of a successful call, context blocks cut off."
+  [answer]
+  (d/answer-body (d/result-text answer)))
+
 (defn- kanban!
   [ports config ctx status]
   (let [dir    (directory ports ctx)
         answer (call! ports (d/kanban-request config dir status))]
     (if-let [err (d/result-error answer)]
       {:text (str "/hive kanban failed: " err)}
-      (let [text    (d/result-text answer)
+      (let [text    (body answer)
             rows    (d/kanban-rows ((:json-parse ports) text))
             project (d/project-hint dir)]
         ((:panel! ports) (d/kanban-panel rows text project status))
         {:text (d/kanban-summary rows project)}))))
+
+(defn- memory!
+  [ports config ctx query]
+  (let [answer (call! ports (d/memory-search-request config (directory ports ctx) {:query query}))]
+    (if-let [err (d/result-error answer)]
+      {:text (str "/hive memory failed: " err)}
+      {:text (d/memory-text query ((:json-parse ports) (body answer)))})))
 
 (defn- swarm!
   [ports config ctx scope]
@@ -51,16 +63,23 @@
         answer (call! ports (d/swarm-request config dir scope))]
     (if-let [err (d/result-error answer)]
       {:text (str "/hive swarm failed: " err)}
-      (let [text (d/result-text answer)
+      (let [text (body answer)
             rows (d/swarm-rows ((:json-parse ports) text))]
         ((:panel! ports) (d/swarm-panel rows text scope))
         {:text (d/swarm-summary rows)}))))
+
+(defn- shout!
+  [ports config ctx message]
+  (let [answer (call! ports (d/shout-request config (directory ports ctx) message))]
+    (if-let [err (d/result-error answer)]
+      {:text (str "/hive shout failed: " err)}
+      {:text "shouted to the hivemind"})))
 
 (defn run-command
   "Handles one /hive invocation against `ports`. Answers a dirge command
    reply {:text ..} or {:text .. :prompt ..}."
   [ports config ctx]
-  (let [{:keys [action status scope reason]} (d/parse-command ctx)]
+  (let [{:keys [action status scope reason query message]} (d/parse-command ctx)]
     (case action
       :help    {:text d/usage}
       :unknown {:text (str reason "\n" d/usage)}
@@ -69,7 +88,9 @@
       :wrap    (d/command-reply config :wrap
                                 (call! ports (d/wrap-request config (directory ports ctx))))
       :kanban  (kanban! ports config ctx status)
-      :swarm   (swarm! ports config ctx scope))))
+      :memory  (memory! ports config ctx query)
+      :swarm   (swarm! ports config ctx scope)
+      :shout   (shout! ports config ctx message))))
 
 ;; ---------------------------------------------------------------------------
 ;; Session hooks
@@ -145,7 +166,7 @@
     {:dirge/system-prompt (fn [_] (d/system-prompt (current-config state)))
      :dirge/session-start (fn [ctx] (session-start ports (current-config state) ctx))
      :dirge/session-end   (fn [ctx] (session-end ports (current-config state) ctx))
-     :dirge/commands      {"hive" {:description "hive: catchup | wrap | kanban [status] | swarm [scope]"
+     :dirge/commands      {"hive" {:description "hive: catchup | wrap | kanban [status] | memory <query> | swarm [scope] | shout <message>"
                                    :handler     (fn [ctx]
                                                   (run-command ports (current-config state) ctx))}}}))
 
