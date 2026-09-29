@@ -23,6 +23,14 @@
                              commands (default: one worker thread over a
                              FIFO of domain/reply-queue-capacity)
 
+   Feature handshake (Lens C3): a dirge client may subscribe with
+   `?features=spans,keys,cursor,open-file`; hive-vessel's bridge records the
+   parsed set per client and :vessel/target answers it as :vessel/features.
+   The dirge show-panel translator gates on it: spans, keys and cursor ride
+   only when advertised, else plain lines (row ids always survive). Union
+   semantics and the version constant live in docs/lenses.md and
+   domain/feature-set-version.
+
    The token is only ever written to the 0600 discovery file; health and
    metadata never carry it."
   (:require [hive-addon.protocol :as addon]
@@ -36,6 +44,83 @@
 ;; SPDX-License-Identifier: MIT
 
 (def reply-log-size 20)
+
+;; =============================================================================
+;; Feature-gated panel feed (Lens C3)
+;; =============================================================================
+
+(defn- span-lines-message
+  "The hive-vessel show-panel-message, resolved at call time: branch
+   lens-h1-span-lines adds the 2-arity [op target], which renders span lines
+   when (:vessel/features target) contains :spans; the pinned 0.1.12 has only
+   the 1-arity, which renders plain lines either way. The single indirection
+   point for the dialect upgrade -- never a load-time capture."
+  (^java.util.Map [op] (span-lines-message op nil))
+  (^java.util.Map [op target]
+   (if-let [f (resolve 'hive-vessel.dialect.json/show-panel-message)]
+     (f op target)
+     (json/show-panel-message op))))
+
+(defn- flatten-span-rows
+  "Span lines -> plain lines: a line that carries a \"spans\" breakdown keeps
+   only {text, face, id}; plain lines pass through unchanged. Id-bearing rows
+   keep their id, so invoke routing works on any client."
+  [rows]
+  (mapv #(if (contains? % "spans")
+           (select-keys % ["text" "face" "id"])
+           %)
+        rows))
+
+(defn- plain-lines
+  "The pre-handshake wire: the doc's rendered lines, flattened to plain
+   lines, plus -- when the op carries :panel/rows (a lens view) -- the title
+   followed by the rows as plain lines."
+  [op]
+  ;; show-panel-message passes every op field through, so the plain wire
+  ;; strips the fields the feature gates own (and the internal rows); each
+  ;; gate re-adds its field when the client advertised it.
+  (let [message (update (dissoc (span-lines-message op) "keys" "cursor" "panel/rows")
+                        "lines" flatten-span-rows)
+        rows (:panel/rows op)]
+    (if (seq rows)
+      (assoc message "lines"
+             (wire/->json-data
+              (into [{:text (get-in op [:doc :doc/title]) :face :title}] rows)))
+      message)))
+
+(defn panel-message
+  "The :json show-panel message for a connected dirge client set whose
+   advertised features are FEATURES (the union of the per-client sets the
+   bridge records; see boundary/client-features). The client advertised:
+
+     :spans   the \"lines\" carry their span rows:
+              {\"face\": .., \"id\": .., \"spans\": [{\"text\": .., \"face\": ..}]};
+              lens :panel/rows pass through unchanged as rows, ids included
+     :keys    the message carries \"keys\" (dirge chords -> reply verb or
+              {\"invoke\" verb}) whenever the op carries :keys
+     :cursor  the message carries \"cursor\": true whenever the op carries
+              a truthy :cursor
+
+   Anything not advertised degrades: without :spans every span row flattens
+   to a plain {text, face, id} line, and the keys/cursor fields are omitted
+   -- never a richer message than the client's feature set, never an error.
+   There is no top-level \"spans\" key: dirge reads span rows inside \"lines\"
+   (docs/panel-feed.md). With no client connected FEATURES is #{}
+   (pre-handshake behaviour), so the gates are conservative by construction.
+
+   PURE: which features a client set advertises is the only input; the
+   bridge read happens in the translator's closure."
+  ^java.util.Map
+  [features op]
+  (let [features (or features #{})
+        with-spans (if (contains? features :spans)
+                     (span-lines-message op {:vessel/features features})
+                     (plain-lines op))]
+    (cond-> with-spans
+      (and (contains? features :keys) (:keys op))
+      (assoc "keys" (wire/->json-data (:keys op)))
+      (and (contains? features :cursor) (:cursor op))
+      (assoc "cursor" (wire/->json-data (:cursor op))))))
 
 (defn- dependency-hooks [config]
   (keep (fn [[_ dep]]
@@ -106,22 +191,15 @@
                                          {:port (:port bridge) :token token
                                           :pid (.pid (java.lang.ProcessHandle/current))
                                           :lenses lenses}))
-          (let [registry (atom (v/register
+          (let [features-fn (fn [] (boundary/client-features bridge))
+                registry (atom (v/register
                                 (v/registry-from-hooks (dependency-hooks config))
                                 {:translator/id :hive-dirge/lens-panel
                                  :translator/op :ui/show-panel
                                  :translator/priority 1
                                  :translator/when {:vessel/id :dirge}
                                  :translator/translate
-                                 (fn [op _]
-                                   (let [message (json/show-panel-message op)
-                                         rows (:panel/rows op)]
-                                     (json/native
-                                      (if (seq rows)
-                                        (assoc message "lines"
-                                               (wire/->json-data
-                                                (into [{:text (get-in op [:doc :doc/title]) :face :title}] rows)))
-                                        message))))}))
+                                 (fn [op _] (json/native (panel-message (features-fn) op)))}))
                 target (domain/target (boundary/executor bridge))]
             (swap! state assoc
                    :lifecycle :active :bridge bridge :queue queue :discovery path
@@ -172,7 +250,7 @@
   (hooks [_]
     (let [{:keys [lifecycle bridge registry target]} @state]
       (if (= :active lifecycle)
-        {:vessel/target (fn [] target)
+        {:vessel/target (fn [] (assoc target :vessel/features (boundary/client-features bridge)))
          :vessel/dispatch! (fn [op-or-ops] (v/dispatch! registry target op-or-ops))
          :vessel/register-translators! (fn [translators] (swap! registry v/register-all translators) nil)
          :dirge/bridge (fn [] (boundary/bridge-status bridge))

@@ -16,6 +16,7 @@
             [hive-dirge.host.boundary :as boundary]
             [hive-dirge.host.domain :as domain]
             [hive-dirge.host.ports :as ports]
+            [hive-vessel.dialect.json :as json]
             [hive-vessel.executor.sse :as sse]
             [hive-vessel.wire :as wire])
   (:import (java.net URI)
@@ -78,6 +79,16 @@
   (let [t0 (System/nanoTime)
         v (f)]
     [v (/ (- (System/nanoTime) t0) 1e6)]))
+
+(defn- open-events-url
+  "Subscribe to a raw URL; returns a queue of raw SSE lines."
+  [u]
+  (let [q (LinkedBlockingQueue.)
+        resp (.send client (.build (HttpRequest/newBuilder (URI. u)))
+                    (HttpResponse$BodyHandlers/ofLines))]
+    (future (try (doseq [l (iterator-seq (.iterator (.body resp)))] (.put q l))
+                 (catch Throwable _ nil)))
+    q))
 
 (defn- open-events
   "Subscribe to <url>/events; returns a queue of raw SSE lines."
@@ -489,6 +500,22 @@
     :log! (fn [level msg] (swap! lens-calls conj [level msg]))
     :cwd (constantly "/w/proj")}))
 
+(defn- handshake-bridge?
+  "True when the hive-vessel bridge records per-client features (branch
+   lens-c3-features / 0.1.13+). deps.edn pins 0.1.12, which lacks it, so the
+   tests probe which side they run against and assert the matching contract."
+  []
+  (boolean (resolve 'hive-vessel.executor.sse/client-features)))
+
+(def feature-panel
+  "A lens-style show-panel: title, plain rows, dirge chords and a cursor."
+  {:op :ui/show-panel
+   :panel/id "kanban"
+   :doc {:doc/title "Kanban" :doc/blocks [{:block/type :para :text "No active tasks"}]}
+   :panel/rows [{:text "task-42" :face :row :id "task-42"}]
+   :keys {"enter" {"invoke" "open"}}
+   :cursor true})
+
 (deftest mounted-kanban-lens-wire
   (reset! lens-calls [])
   (let [path (temp-discovery)
@@ -504,7 +531,9 @@
       (is (= ["hive.dirge" "hive.dirge.host"] (:order report)))
       (let [discovered (discovery path)
             caps (get discovered "capabilities")
-            q (open-events discovered)
+            q (open-events-url (url discovered "/events"
+                                       (str (get discovered "token")
+                                            "&vessel=dirge&features=spans,keys,cursor")))
             addon-instance (mount-port/registered mounted "hive.dirge")
             dirge-host (mount-port/registered mounted "hive.dirge.host")]
         (is (= 1 (get caps "version")))
@@ -518,16 +547,134 @@
               dispatch! (:vessel/dispatch! (addon/hooks dirge-host))]
           (is (= "kanban" (:panel/id op)))
           (is (contains? (dispatch! op) :ok))
-          (let [frame (read-frame q)
-                data (wire/read-json (get frame "data"))]
-            (is (= "ui/show-panel" (get data "op")))
+          (let [frame (fn []
+                        (when-let [f (read-frame q)]
+                          (when-let [d (get f "data")]
+                            (when (= "ui/show-panel" (get (wire/read-json d) "op"))
+                              f))))
+                data (wire/read-json (get (eventually frame) "data"))]
             (is (= "kanban" (get data "panel/id")))
-            (is (= true (get-in data ["cursor"])))
+            (is (= true (get data "cursor")))
             (is (= {"invoke" "open"} (get-in data ["keys" "enter"])))
-            (is (some #(= "task-42" (get % "id")) (get data "lines")))))
+            (is (nil? (get data "spans"))
+                "span rows ride inside \"lines\", never a top-level \"spans\"")
+            (if (handshake-bridge?)
+              (do (is (some #(and (get % "spans")
+                                  (= "task-42" (get % "id")))
+                            (get data "lines"))
+                      "the advertising client's lens rows arrive as span lines with ids")
+                  (is (some #(and (nil? (get % "spans"))
+                                  (= "task-42" (get % "text")))
+                            (get data "lines"))
+                      "span rows flatten to plain {text, face, id} lines"))
+              (do (is (every? #(nil? (get % "spans")) (get data "lines"))
+                      "pre-handshake hive-vessel renders plain lines only")
+                  (is (some #(= "task-42" (get % "id")) (get data "lines"))
+                      "row ids survive on plain lines")))))
         (is (= 202 (post-reply discovered
                                "{\"action\":\"invoke\",\"panel\":\"kanban\",\"verb\":\"open\",\"row\":\"task-42\",\"payload\":{}}")))
         (is (eventually #(some #{[:info "kanban open task-42"]} @lens-calls)))
         (is (= 202 (post-reply discovered "{\"action\":\"next-tab\"}"))))
       (finally
         (mount/teardown! mounted (:order report))))))
+
+;; =============================================================================
+;; Lens C3 handshake: :vessel/features and the feature-gated panel feed
+;; =============================================================================
+
+(deftest feature-set-version-is-1
+  (is (= 1 domain/feature-set-version)))
+
+(deftest panel-message-degrades-to-plain-lines-without-features
+  (let [m (host/panel-message #{} feature-panel)]
+    (is (= "Kanban" (get-in m ["lines" 0 "text"])))
+    (is (= "task-42" (get-in m ["lines" 1 "id"]))
+        "row ids survive on plain lines even with no client features")
+    (is (nil? (get m "spans")))
+    (is (nil? (get m "keys")))
+    (is (nil? (get m "cursor"))))
+  (is (= (json/show-panel-message {:op :ui/show-panel
+                                   :panel/id "p"
+                                   :doc {:doc/title "T" :doc/blocks []}})
+         (host/panel-message nil {:op :ui/show-panel
+                                  :panel/id "p"
+                                  :doc {:doc/title "T" :doc/blocks []}}))
+      "a doc-only panel with no client degrades to the plain dialect message"))
+
+(deftest panel-message-upgrades-with-advertised-features
+  (let [m (host/panel-message #{:spans :keys :cursor} feature-panel)]
+    (is (nil? (get m "spans"))
+        "dirge reads span rows inside \"lines\", never a top-level \"spans\"")
+    (is (= {"invoke" "open"} (get-in m ["keys" "enter"])))
+    (is (= true (get m "cursor"))))
+  (testing "an unadvertised feature never leaks"
+    (is (nil? (get (host/panel-message #{:keys} feature-panel) "spans")))
+    (is (nil? (get (host/panel-message #{:cursor} feature-panel) "keys")))
+    (is (nil? (get (host/panel-message #{} feature-panel) "cursor"))))
+  (testing "an op without chords or cursor carries no keys/cursor fields"
+    (let [m (host/panel-message #{:keys :cursor}
+                                {:op :ui/show-panel :panel/id "p"
+                                 :doc {:doc/title "T" :doc/blocks []}})]
+      (is (nil? (get m "keys")))
+      (is (nil? (get m "cursor"))))))
+
+(deftest target-features-start-empty-and-follow-subscriptions
+  (let [path (temp-discovery)]
+    (with-host [a {:dirge/discovery-path path :dirge/olympus (recording)}]
+      (let [doc (discovery path)
+            target ((:vessel/target (addon/hooks a)))]
+        (is (= :dirge (:vessel/id target)))
+        (is (= #{} (:vessel/features target))
+            "no dirge client has subscribed yet"))
+      (let [doc (discovery path)
+            sub (fn [] (open-events-url (url doc "/events"
+                                             (str (get doc "token")
+                                                  "&vessel=dirge&features=spans,keys,cursor,open-file"))))
+            target-features (fn [] (:vessel/features ((:vessel/target (addon/hooks a)))))]
+        (if (handshake-bridge?)
+          (is (eventually
+               (fn []
+                 (sub) ; the JDK client delivers nothing until more bytes follow
+                 (= #{:spans :keys :cursor :open-file} (target-features))))
+              "the bridge records the parsed features per client; the target answers them")
+          (is (eventually
+               (fn [] (do (sub) (= #{} (target-features)))))
+              "pre-handshake hive-vessel: the resolve fallback degrades to #{}"))))))
+
+(deftest show-panel-feed-degrades-without-features-and-upgrades-with-them
+  (let [path (temp-discovery)]
+    (with-host [a {:dirge/discovery-path path :dirge/olympus (recording)
+                   :dirge/heartbeat-ms 100}]
+      (let [doc (discovery path)
+            plain-q (open-events doc)
+            rich-q (open-events-url (url doc "/events"
+                                         (str (get doc "token")
+                                              "&vessel=dirge&features=spans,keys,cursor")))]
+        (is (= "retry: 2000" (next-line plain-q)))
+        (is (= "retry: 2000" (next-line rich-q)))
+        (let [dispatch! (:vessel/dispatch! (addon/hooks a))]
+          (is (contains? (dispatch! feature-panel) :ok))
+          (let [message-when (fn [pred q]
+                               (fn []
+                                 (when-let [frame (read-frame q)]
+                                   (when-let [m (get frame "data")]
+                                     (let [parsed (wire/read-json m)]
+                                       (when (pred parsed) parsed))))))
+                plain? (fn [m] (and (nil? (get m "keys"))
+                                    (nil? (get m "cursor"))
+                                    (nil? (get m "spans"))))
+                rich? (fn [m] (and (= {"invoke" "open"} (get-in m ["keys" "enter"]))
+                                   (= true (get m "cursor"))
+                                   (nil? (get m "spans"))
+                                   (some #(and (get % "spans")
+                                               (= "task-42" (get % "id")))
+                                         (get m "lines"))
+                                   (some #(= "task-42" (get % "text"))
+                                         (get m "lines"))))]
+            (is (eventually (message-when plain? plain-q) 5000)
+                "the unfeatured client gets plain lines only")
+            (if (handshake-bridge?)
+              (is (eventually (message-when rich? rich-q) 5000)
+                  "a client that advertised spans/keys/cursor gets the upgraded feed")
+              (is (eventually (message-when plain? rich-q) 5000)
+                  "pre-handshake hive-vessel records no features, so the feed stays plain"))))))))

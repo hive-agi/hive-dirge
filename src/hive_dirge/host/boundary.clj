@@ -129,6 +129,27 @@
 
 (defn executor [bridge] (sse/executor bridge))
 
+(defn client-features
+  "The UNION of every connected dirge client's advertised feature set (a set
+   of keywords, e.g. #{:spans :keys :cursor :open-file}), read from the
+   bridge. nil or a blank subscription `features` param is no features, so
+   with no client this is #{}.
+
+   UNION vs INTERSECTION: the target advertises the union, so a client that
+   supports a feature always sees it; a translator that must degrade rather
+   than upgrade gates on the complement (ship spans/keys/cursor only when
+   EVERY connected client advertised them) -- see the lens-panel translator
+   in hive-dirge.host.
+
+   The reader resolves `hive-vessel.executor.sse/client-features` at call
+   time: it exists only from hive-vessel 0.1.13 (commit d7fda1a, branch
+   lens-c3-features), while deps.edn still pins 0.1.12. A missing reader
+   degrades to #{} -- the pre-handshake behaviour -- never a load error."
+  [bridge]
+  (if-let [reader (resolve 'hive-vessel.executor.sse/client-features)]
+    (reader bridge (name domain/vessel-id))
+    #{}))
+
 (defn bridge-status
   "What health may show about BRIDGE. Never the token."
   [bridge]

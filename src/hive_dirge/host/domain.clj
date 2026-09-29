@@ -52,6 +52,19 @@
   [port]
   (str "http://127.0.0.1:" port route-prefix))
 
+(def feature-set-version
+  "Version 1 of the subscription feature set: a dirge client subscribes with
+   GET /vessel/events?token=..&features=spans,keys,cursor,open-file and the
+   bridge records the parsed set per client, readable through
+   boundary/client-features and exposed as :vessel/features on the target.
+   Bump only for a breaking change to the `features` param semantics;
+   additive features never move it. The mirror of
+   hive-vessel.executor.handshake/feature-set-version in the worktree
+   branch lens-c3-features; deps.edn still pins hive-vessel 0.1.12, which
+   lacks it, so this repo owns its copy until the pin moves. See
+   docs/lenses.md."
+  1)
+
 (defn discovery-doc
   "The discovery document (string keys, JSON-ready). It carries the token, so
    it is only ever written to a 0600 file and never logged."

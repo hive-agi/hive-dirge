@@ -20,3 +20,29 @@ provide `:dirge/lenses` in the addon manifest capabilities so the host mounts
 after it. The discovery doc publishes capabilities v1 with replies, derived
 invokes and key hints; each panel's keys remain authoritative when chords
 collide across lenses. The five Olympus reply actions are unchanged.
+
+## Feature handshake (Lens C3)
+
+dirge subscribes with `GET /vessel/events?token=..&vessel=dirge&features=spans,keys,cursor,open-file`.
+hive-vessel (commit d7fda1a, branch lens-c3-features) parses the comma list per client and records
+the set; hive-dirge's host reads it back and answers it as `:vessel/features` on the `:vessel/target`
+hook. The feature set is versioned at **1** (`hive-dirge.host.domain/feature-set-version`, the
+mirror of `hive-vessel.executor.handshake/feature-set-version`); bump only for a breaking change to
+the `features` param semantics.
+
+**Union semantics.** The target advertises the **union** of the connected dirge clients'
+sets: a feature is present when *any* client advertised it. Every consumer of
+`:vessel/features` gates on that union: the dirge show-panel translator ships
+`spans`, `keys` and `cursor` whenever the union contains them. The union is the
+capability-projection policy -- a feature a client never advertised must not
+degrade the clients that did (and a translator that must degrade rather than
+upgrade gates on the complement of its own choosing, never on the union).
+Plain lines always carry row `id`s, so invoke routing works on any client.
+
+- `:spans` — the message also carries the structured `"spans"` breakdown of the doc.
+- `:keys` — the message carries `"keys"` (dirge chords) when the panel declares them.
+- `open-file` — reserved for the open-file feed op.
+
+`deps.edn` still pins `hive-vessel 0.1.12`, whose bridge does not record features: the reader
+resolves `hive-vessel.executor.sse/client-features` at call time and degrades to `#{}` (plain
+lines), so this repo loads and runs green against either side.
