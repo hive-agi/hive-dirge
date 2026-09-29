@@ -140,9 +140,9 @@
    they do not understand; no intersection-based downgrade is applied.
 
    The reader resolves `hive-vessel.executor.sse/client-features` at call
-   time: it exists only from hive-vessel 0.1.13 (commit d7fda1a, branch
-   lens-c3-features), while deps.edn still pins 0.1.12. A missing reader
-   degrades to #{} -- the pre-handshake behaviour -- never a load error."
+   time: it exists from hive-vessel 0.1.13 onward (the production pin is
+   0.1.14). A missing reader under an older :dev override degrades to #{}
+   -- the pre-handshake behaviour -- never a load error."
   [bridge]
   (if-let [reader (resolve 'hive-vessel.executor.sse/client-features)]
     (reader bridge (name domain/vessel-id))

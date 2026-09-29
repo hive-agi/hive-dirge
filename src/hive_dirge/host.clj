@@ -51,13 +51,21 @@
 
 (defn- span-lines-message
   "Resolve the vessel dialect at call time. 0.1.12 has only the one-arity
-   implementation; use that plain renderer when the two-arity seam is absent."
+   implementation; use that plain renderer when the two-arity seam is absent
+   (notably when :dev overrides the released pin with a sibling checkout)."
   [op target]
   (let [f (or (resolve 'hive-vessel.dialect.json/show-panel-message)
               #'json/show-panel-message)]
     (if (some #{2} (:arglists (meta f)))
       (f op target)
       (f op))))
+
+(defn- neutral-panel-message [message features]
+  ;; The :dev alias may override 0.1.14 with a pre-C5 hive-vessel checkout.
+  ;; Those clients never advertise features; retain their legacy vocabulary.
+  (if-let [neutralize (resolve 'hive-vessel.dialect.json/neutralize)]
+    (neutralize message {:vessel/features features})
+    message))
 
 (defn- plain-row [row]
   (let [spans (or (get row "spans") (:spans row))
@@ -100,6 +108,8 @@
    There is no top-level \"spans\" key: dirge reads span rows inside \"lines\"
    (docs/panel-feed.md). With no client connected FEATURES is #{}
    (pre-handshake behaviour), so the gates are conservative by construction.
+   Vessel's JSON dialect neutralizes names for any v2 feature set: show,
+   id, and nested doc title; legacy clients retain qualified names.
 
    PURE: which features a client set advertises is the only input; the
    bridge read happens in the translator's closure."
@@ -109,11 +119,13 @@
         with-spans (if (contains? features :spans)
                      (panel-lines op true)
                      (panel-lines op false))]
-    (cond-> with-spans
-      (and (contains? features :keys) (:keys op))
-      (assoc "keys" (wire/->json-data (:keys op)))
-      (and (contains? features :cursor) (:cursor op))
-      (assoc "cursor" (wire/->json-data (:cursor op))))))
+    (neutral-panel-message
+     (cond-> with-spans
+       (and (contains? features :keys) (:keys op))
+       (assoc "keys" (wire/->json-data (:keys op)))
+       (and (contains? features :cursor) (:cursor op))
+       (assoc "cursor" (wire/->json-data (:cursor op))))
+     features)))
 
 (defn- dependency-hooks [config]
   (keep (fn [[_ dep]]

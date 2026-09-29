@@ -510,14 +510,17 @@
                 {:content [{:type "text" :text "ROWS"}]})
     :json-parse (fn [_] [{:id "task-42" :title "Task" :status "todo"
                            :priority "high" :project "proj"}])
-    :panel! (fn [op] (swap! lens-calls conj op) true)
+    :panel! (fn [op] (swap! lens-calls conj
+                            (update op :panel/rows
+                                    (fn [rows] (mapv #(assoc % :payload {:task 42}) rows))))
+                    true)
     :log! (fn [level msg] (swap! lens-calls conj [level msg]))
     :cwd (constantly "/w/proj")}))
 
 (defn- handshake-bridge?
-  "True when the hive-vessel bridge records per-client features (branch
-   lens-c3-features / 0.1.13+). deps.edn pins 0.1.12, which lacks it, so the
-   tests probe which side they run against and assert the matching contract."
+  "True when the hive-vessel bridge records per-client features (0.1.13+).
+   The production pin is 0.1.14; keep the probe for :dev against an older
+   sibling checkout."
   []
   (boolean (resolve 'hive-vessel.executor.sse/client-features)))
 
@@ -564,10 +567,12 @@
           (let [frame (fn []
                         (when-let [f (read-frame q)]
                           (when-let [d (get f "data")]
-                            (when (= "ui/show-panel" (get (wire/read-json d) "op"))
+                            (when (= "show" (get (wire/read-json d) "op"))
                               f))))
                 data (wire/read-json (get (eventually frame) "data"))]
-            (is (= "kanban" (get data "panel/id")))
+            (is (= "kanban" (get data "id")))
+            (is (= "show" (get data "op")))
+            (is (= "hive kanban" (get-in data ["doc" "title"])))
             (is (= (when (handshake-bridge?) true) (get data "cursor")))
             (is (= (when (handshake-bridge?) {"invoke" "open"})
                    (get-in data ["keys" "enter"])))
@@ -579,7 +584,7 @@
                             (get data "lines"))
                       "lens rows pass through with their ids and payloads")
                   (is (some #(and (nil? (get % "spans"))
-                                  (= "task-42" (get % "text")))
+                                  (str/includes? (get % "text") "task-42"))
                             (get data "lines"))
                       "span rows flatten to plain {text, face, id} lines"))
               (do (is (every? #(nil? (get % "spans")) (get data "lines"))
@@ -602,6 +607,9 @@
 
 (deftest panel-message-degrades-to-plain-lines-without-features
   (let [m (host/panel-message #{} feature-panel)]
+    (is (= "ui/show-panel" (get m "op")))
+    (is (= "kanban" (get m "panel/id")))
+    (is (= "Kanban" (get-in m ["doc" "doc/title"])))
     (is (= "Kanban" (get-in m ["lines" 0 "text"])))
     (is (= {"task" 42} (get-in m ["lines" 1 "payload"])))
     (is (= "task-42" (get-in m ["lines" 1 "id"]))
@@ -619,10 +627,30 @@
 
 (deftest panel-message-upgrades-with-advertised-features
   (let [m (host/panel-message #{:spans :keys :cursor} feature-panel)]
+    (is (= "show" (get m "op")))
+    (is (= "kanban" (get m "id")))
+    (is (= "Kanban" (get-in m ["doc" "title"])))
+    (is (= {"task" 42} (get-in m ["lines" 1 "payload"])))
     (is (nil? (get m "spans"))
         "dirge reads span rows inside \"lines\", never a top-level \"spans\"")
     (is (= {"invoke" "open"} (get-in m ["keys" "enter"])))
     (is (= true (get m "cursor"))))
+  (testing "a span-bearing lens row survives v2 and flattens for legacy"
+    (let [op (assoc feature-panel :panel/rows
+                    [{:id "task-42" :face :row :payload {:task 42}
+                      :spans [{:text "Task " :face :row}
+                              {:text "42" :face :warn}]}])
+          rich (host/panel-message #{:spans} op)
+          plain (host/panel-message #{} op)]
+      (is (= [{"text" "Task " "face" "row"}
+              {"text" "42" "face" "warn"}]
+             (get-in rich ["lines" 1 "spans"])))
+      (is (= "task-42" (get-in rich ["lines" 1 "id"])))
+      (is (= {"task" 42} (get-in rich ["lines" 1 "payload"])))
+      (is (= "Task 42" (get-in plain ["lines" 1 "text"])))
+      (is (nil? (get-in plain ["lines" 1 "spans"])))
+      (is (= "task-42" (get-in plain ["lines" 1 "id"])))
+      (is (= {"task" 42} (get-in plain ["lines" 1 "payload"])))))
   (testing "two-arity vessel renderer puts doc spans inside lines when available"
     (let [op {:op :ui/show-panel :panel/id "doc"
               :doc {:doc/title "Title" :doc/blocks [{:block/type :para :text "Body"}]}}
@@ -669,34 +697,36 @@
                    :dirge/heartbeat-ms 100}]
       (let [doc (discovery path)
             plain-q (open-events doc)
-            rich-q (open-events-url (url doc "/events"
-                                         (str (get doc "token")
-                                              "&vessel=dirge&features=spans,keys,cursor")))]
+            dispatch! (:vessel/dispatch! (addon/hooks a))
+            message-when (fn [pred q]
+                           (fn []
+                             (when-let [frame (read-frame q)]
+                               (when-let [m (get frame "data")]
+                                 (let [parsed (wire/read-json m)]
+                                   (when (pred parsed) parsed))))))
+            plain? (fn [m] (and (= "ui/show-panel" (get m "op"))
+                                (= "kanban" (get m "panel/id"))
+                                (nil? (get m "keys"))
+                                (nil? (get m "cursor"))
+                                (every? #(nil? (get % "spans")) (get m "lines"))
+                                (= {"task" 42} (get-in m ["lines" 1 "payload"]))))
+            rich? (fn [m] (and (= "show" (get m "op"))
+                               (= "kanban" (get m "id"))
+                               (= {"invoke" "open"} (get-in m ["keys" "enter"]))
+                               (= true (get m "cursor"))
+                               (some #(and (= "task-42" (get % "id"))
+                                           (= {"task" 42} (get % "payload")))
+                                     (get m "lines"))))]
         (is (= "retry: 2000" (next-line plain-q)))
-        (is (= "retry: 2000" (next-line rich-q)))
-        (let [dispatch! (:vessel/dispatch! (addon/hooks a))]
+        (is (contains? (dispatch! feature-panel) :ok))
+        (is (eventually (message-when plain? plain-q) 5000)
+            "the unfeatured client gets legacy names and plain lines before a rich subscription")
+        (let [rich-q (open-events-url (url doc "/events"
+                                           (str (get doc "token")
+                                                "&vessel=dirge&features=spans,keys,cursor")))]
+          (is (= "retry: 2000" (next-line rich-q)))
+          ;; The bridge uses the union of connected client features. The next
+          ;; broadcast upgrades both streams; it does not lower per recipient.
           (is (contains? (dispatch! feature-panel) :ok))
-          (let [message-when (fn [pred q]
-                               (fn []
-                                 (when-let [frame (read-frame q)]
-                                   (when-let [m (get frame "data")]
-                                     (let [parsed (wire/read-json m)]
-                                       (when (pred parsed) parsed))))))
-                plain? (fn [m] (and (nil? (get m "keys"))
-                                    (nil? (get m "cursor"))
-                                    (nil? (get m "spans"))))
-                rich? (fn [m] (and (= {"invoke" "open"} (get-in m ["keys" "enter"]))
-                                   (= true (get m "cursor"))
-                                   (nil? (get m "spans"))
-                                   (some #(and (= "task-42" (get % "id"))
-                                               (= {"task" 42} (get % "payload")))
-                                         (get m "lines"))
-                                   (some #(= "task-42" (get % "text"))
-                                         (get m "lines"))))]
-            (is (eventually (message-when plain? plain-q) 5000)
-                "the unfeatured client gets plain lines only")
-            (if (handshake-bridge?)
-              (is (eventually (message-when rich? rich-q) 5000)
-                  "a client that advertised spans/keys/cursor gets the upgraded feed")
-              (is (eventually (message-when plain? rich-q) 5000)
-                  "pre-handshake hive-vessel records no features, so the feed stays plain"))))))))
+          (is (eventually (message-when rich? plain-q) 5000))
+          (is (eventually (message-when rich? rich-q) 5000)))))))
