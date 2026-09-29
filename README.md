@@ -60,12 +60,20 @@ src/hive_dirge/hive/addon.cljc         hive.dirge IAddon (record HiveDirgeAddon)
 src/hive_dirge/hive/domain.cljc        pure: config, /hive parsing, MCP requests, answers -> text and panels
 src/hive_dirge/harness.cljc            dirge.harness from portable code (notify, mcp-call, panel!, ...)
 src/hive_dirge/probe/addon.cljc        probe IAddon (record DirgeProbeAddon, ctor addon-ctor)
+src/hive_dirge/economy/addon.cljc      hive.dirge.economy IAddon: hooks + context_retrieve, wiring only
+src/hive_dirge/economy/ports.cljc      IObservationLog, IObservationIndex, IDigestor
+src/hive_dirge/economy/{domain,digest,markdown}.cljc
+                                       pure: Observation/Handle, Digest build + budget fit, markdown render/parse
+src/hive_dirge/economy/pipeline/       observe (after-tool-call), retrieve (tool), compact (compact hooks)
+src/hive_dirge/economy/adapters/       local observation log, structured digestor
+src/hive_dirge/economy/registry.cljc   strategy registry selected by :addon/config
 src/hive_dirge/host.clj                hive.dirge.host IAddon (JVM); host/{domain,ports,boundary}.clj strata
 test/hive_dirge/host_test.clj          discovery 0600, token/Origin, reply routing, SSE frames, mount e2e
 resources/META-INF/hive-addons/
   hive-dirge.edn                       :addon/id "hive.dirge"
   hive-dirge-probe.edn                 mount manifest, :addon/id "hive.dirge.probe"
   hive-dirge-host.edn                  :addon/id "hive.dirge.host"
+  hive-dirge-economy.edn               :addon/id "hive.dirge.economy"
   hive-olympus-dirge.edn               olympus harness, host hive.dirge.host
 test/hive_dirge/probe/addon_test.clj   manifest -> ctor -> IAddon -> lifecycle
 test/fixtures/probe/                   hot-reload fixtures (v1 / v2 of probe.addon)
@@ -99,6 +107,41 @@ from the dirge release "dirge addon session hooks" (older dirge ignores them;
 - `:dirge/session-end` runs hive `session wrap` when `:hive/auto-wrap?` is on
   and the session ends by `:exit`; a `:swap` wraps only with
   `:hive/wrap-on-swap?` true.
+
+## hive.dirge.economy: context economy hooks
+
+`hive.dirge.economy` (manifest `hive-dirge-economy.edn`) keeps a session's
+context bounded without losing what was folded away:
+
+- `:dirge/after-tool-call` logs every tool result under a short content handle
+  (`§1a2b3c4d`), in memory and in `.dirge/economy/<session>.edn`. The
+  `context_retrieve` tool reads a handle back, either whole or as a line or
+  char range. The hook answers nil, so dirge appends nothing.
+- `:dirge/compact` receives `{:span [{:role :text :tool :tool-use-id} ...]
+  :tokens :reason :focus :ctx-max :pressure :session-id}` and answers
+  `{:summary markdown}`, or nil so that dirge's built-in summarizer runs. The
+  summary is a digest that uses dirge's own summary section names. It opens with
+  a `REFERENCE-ONLY` line and holds:
+  - Active Task: the latest user message, verbatim.
+  - Goal: the first task statement, verbatim.
+  - Completed Actions: a numbered, past-tense list (`E<epoch>.<step>`).
+  - Relevant Files, Key Decisions, and errors (under Critical Context).
+  - Remaining Work: the TODO/checkbox lines in their latest state.
+  - Source Coverage: one citation per folded tool result, with its
+    `context_retrieve §handle` hint.
+
+  A later fold copies an earlier digest's lines and citations forward instead
+  of summarizing it again, so handles stay valid across compactions. The digest
+  fits a budget of `:economy/digest-ratio` (0.2) times the span's tokens,
+  clamped to `:economy/digest-min-tokens` (400) and
+  `:economy/digest-max-tokens` (3000), at about 4 chars per token. When it
+  cannot fit, it answers nil.
+- `:dirge/before-compact` only observes: fold count, tokens and the highest
+  pressure show up in the addon's health details.
+
+The digestor is picked from a strategy registry by `:economy/digestor` in
+`:addon/config` (default `:structured`, which makes no model call). Adding a
+strategy means adding an entry to that map.
 
 ## Portability rules for addon code
 

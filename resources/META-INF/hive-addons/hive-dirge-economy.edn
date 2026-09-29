@@ -1,0 +1,12 @@
+{:addon/id           "hive.dirge.economy"
+ :addon/kind         :addon
+ :addon/type         :native
+ :addon/version      "0.1.0"
+ :addon/init-ns      "hive-dirge.economy.addon"
+ :addon/init-fn      "addon-ctor"
+ :addon/config       {:economy/digestor :structured}
+ :addon/capabilities #{:tools :health-reporting :dirge/hooks :context/economy}
+ :addon/dependencies #{}
+ :addon/description  "Context economy for dirge: every tool result is kept under a short content handle, in memory and in .dirge/economy/<session>.edn, and the context_retrieve tool fetches it back, whole or by range. On compaction it answers with a structured REFERENCE-ONLY digest that cites the folded results by handle."
+ :addon/maturity     :experimental
+ :addon/trust-class  :foss}
