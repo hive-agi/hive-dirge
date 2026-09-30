@@ -9,8 +9,11 @@
   #{"context_retrieve"})
 
 (defn collect
+  "Optional :tool-use-id; :tool-call-id is read as its alias."
   [ctx]
-  (select-keys ctx [:tool :args :result :error?]))
+  (let [id (or (:tool-use-id ctx) (:tool-call-id ctx))]
+    (cond-> (select-keys ctx [:tool :args :result :error?])
+      (some? id) (assoc :tool-use-id id))))
 
 (defn promote
   [collected]

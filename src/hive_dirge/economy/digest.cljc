@@ -12,10 +12,12 @@
              :citations [{:handle h :line str}]}
 
    A span entry is {:role \"user\"|\"assistant\"|\"tool\" :text str :tool str?
-   :tool-use-id str? :handle str?}; an entry whose text is a rendered Digest is
+   :tool-use-id str? :args str? :handle str?}, or a \"system\" entry holding a
+   rendered Digest; an entry whose text is a rendered Digest is
    never re-summarized: its lines are carried through as they are."
   (:require [clojure.string :as str]
-            [hive-dirge.economy.markdown :as md]))
+            [hive-dirge.economy.markdown :as md]
+            [hive-dirge.economy.domain :as d]))
 
 ;; ---------------------------------------------------------------------------
 ;; Small text helpers
@@ -57,13 +59,17 @@
     (let [text (:text m)
           text (cond (string? text) text (nil? text) "" :else (pr-str text))
           r    (:role m)
-          role (cond (string? r) r (keyword? r) (name r) :else nil)]
-      (when (contains? #{"user" "assistant" "tool"} role)
+          role (cond (string? r) r (keyword? r) (name r) :else nil)
+          dig? (md/digest-text? text)
+          args (d/args-text (:args m))]
+      (when (or (contains? #{"user" "assistant" "tool"} role)
+                (and (= "system" role) dig?))
         (cond-> {:i i :role role :text text}
           (:tool m)        (assoc :tool (str (:tool m)))
           (:tool-use-id m) (assoc :tool-use-id (str (:tool-use-id m)))
           (:handle m)      (assoc :handle (str (:handle m)))
-          (md/digest-text? text) (assoc :digest (md/parse text)))))))
+          args             (assoc :args args)
+          dig?             (assoc :digest (md/parse text)))))))
 
 (defn normalize-span
   "Well-formed entries of `span`, in order; anything else is dropped."
@@ -159,12 +165,16 @@
   [epoch k]
   (str "E" epoch "." k))
 
+(def done-args-max-chars 120)
+
 (defn done-line
-  [epoch at k {:keys [tool text handle]}]
+  [epoch at k {:keys [tool args text handle]}]
   (let [n  (count (remove str/blank? (lines text)))
         pv (clip (first-line text) 80)]
     (str (step-id epoch k) (when at (str " (" at ")"))
-         " ran " (or tool "a tool") ": " n (if (= 1 n) " line" " lines")
+         " ran " (or tool "a tool")
+         (when-not (str/blank? args) (str " " (clip args done-args-max-chars)))
+         ": " n (if (= 1 n) " line" " lines")
          (when-not (str/blank? pv) (str ", first \"" pv "\""))
          (when handle (str " [" (cite handle) "]")))))
 
