@@ -6,17 +6,21 @@
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is testing]]
+            [clojure.test :refer [deftest is testing use-fixtures]]
             [hive-addon.mount :as mount]
             [hive-addon.mount.port :as mount-port]
             [hive-addon.protocol :as addon]
             [hive-dirge.host :as host]
+            [hive-dirge.hive.addon :as hive-addon]
+            [hive-dirge.lens.registry :as lens]
             [hive-dirge.host.boundary :as boundary]
             [hive-dirge.host.domain :as domain]
             [hive-dirge.host.ports :as ports]
+            [hive-vessel.dialect.json :as json]
             [hive-vessel.executor.sse :as sse]
             [hive-vessel.wire :as wire])
   (:import (java.net URI)
+           (java.time Duration)
            (java.net.http HttpClient HttpClient$Version HttpRequest
                           HttpRequest$BodyPublishers HttpResponse$BodyHandlers)
            (java.nio.file Files LinkOption)
@@ -53,7 +57,7 @@
   (str (get doc "url") route "?token=" (or token (get doc "token"))))
 
 (defn- request [u & {:keys [method body headers]}]
-  (let [b (reduce (fn [b [k v]] (.header b k v)) (HttpRequest/newBuilder (URI. u)) headers)
+  (let [b (reduce (fn [b [k v]] (.header b k v)) (doto (HttpRequest/newBuilder (URI. u)) (.timeout (Duration/ofSeconds 10))) headers)
         b (if (= :post method)
             (.POST b (HttpRequest$BodyPublishers/ofString (or body "")))
             (.GET b))]
@@ -77,28 +81,51 @@
         v (f)]
     [v (/ (- (System/nanoTime) t0) 1e6)]))
 
-(defn- open-events
-  "Subscribe to <url>/events; returns a queue of raw SSE lines."
-  [doc]
+(def ^:dynamic *subscriptions* nil)
+
+(use-fixtures :each
+  (fn [test-fn]
+    (binding [*subscriptions* (atom [])]
+      (try (test-fn)
+           (finally
+             (doseq [{:keys [stream reader]} @*subscriptions*]
+               (.close ^java.util.stream.Stream stream)
+               (future-cancel reader)))))))
+
+(defn- open-events-url
+  "Subscribe to a raw URL. Both the response stream and reader are closed by
+   the per-test fixture, even when an assertion fails."
+  [u]
   (let [q (LinkedBlockingQueue.)
-        resp (.send client (.build (HttpRequest/newBuilder (URI. (url doc "/events"))))
-                    (HttpResponse$BodyHandlers/ofLines))]
-    (future (try (doseq [l (iterator-seq (.iterator (.body resp)))] (.put q l))
-                 (catch Throwable _ nil)))
+        req (-> (HttpRequest/newBuilder (URI. u))
+                (.timeout (Duration/ofSeconds 10)) (.build))
+        resp (.send client req (HttpResponse$BodyHandlers/ofLines))
+        stream (.body resp)
+        reader (future
+                 (try (doseq [l (iterator-seq (.iterator stream))] (.put q l))
+                      (catch Throwable _ nil)))]
+    (swap! *subscriptions* conj {:stream stream :reader reader})
     q))
+
+(defn- open-events [doc]
+  (open-events-url (url doc "/events")))
 
 (defn- next-line [^LinkedBlockingQueue q] (.poll q 5 TimeUnit/SECONDS))
 
 (defn- read-frame
-  "The next complete SSE event from Q as {field value}, skipping comments."
-  [q]
-  (loop [acc {}]
-    (let [l (next-line q)]
-      (cond
-        (nil? l) (when (seq acc) acc)
-        (= "" l) (if (seq acc) acc (recur acc))
-        (str/starts-with? l ":") (recur acc)
-        :else (let [[k v] (str/split l #": ?" 2)] (recur (assoc acc k v)))))))
+  "Next complete SSE event, skipping comments, within five seconds TOTAL.
+   Heartbeats must not reset the deadline when no event will ever arrive."
+  [^LinkedBlockingQueue q]
+  (let [deadline (+ (System/nanoTime) (.toNanos (Duration/ofSeconds 5)))]
+    (loop [acc {}]
+      (let [remaining (- deadline (System/nanoTime))
+            l (when (pos? remaining) (.poll q remaining TimeUnit/NANOSECONDS))]
+        (cond
+          (nil? l) (when (seq acc) acc)
+          (= "" l) (if (seq acc) acc (recur acc))
+          (str/starts-with? l ":") (recur acc)
+          :else (let [[k v] (str/split l #": ?" 2)]
+                  (recur (assoc acc k v))))))))
 
 (defmacro with-host [[sym config] & body]
   `(let [~sym (host/addon-ctor ~config)]
@@ -130,6 +157,17 @@
   (is (= {:command :olympus/next-tab} (domain/parse-reply "{\"action\":\"next-tab\"}")))
   (is (= :reply/missing-target (:reply/error (domain/parse-reply "{\"action\":\"focus\"}"))))
   (is (= :reply/unknown-action (:reply/error (domain/parse-reply "{\"action\":\"rm -rf\"}"))))
+  (is (= {:command :invoke
+          :invoke  {"panel" "kanban" "verb" "open" "row" "t1" "payload" {}}}
+         (domain/parse-reply "{\"action\":\"invoke\",\"panel\":\"kanban\",\"verb\":\"open\",\"row\":\"t1\"}")))
+  (is (= {:command :invoke
+          :invoke  {"panel" "swarm" "verb" "focus" "row" nil "payload" {"k" 1}}}
+         (domain/parse-reply "{\"action\":\"invoke\",\"panel\":\"swarm\",\"verb\":\"focus\",\"payload\":{\"k\":1}}"))
+      "payload defaults to {}, a missing row is nil")
+  (is (= :reply/malformed-invoke
+         (:reply/error (domain/parse-reply "{\"action\":\"invoke\",\"panel\":\"kanban\"}"))))
+  (is (= :reply/malformed-invoke
+         (:reply/error (domain/parse-reply "{\"action\":\"invoke\",\"panel\":\"\",\"verb\":\"open\"}"))))
   (is (= :reply/unparseable (:reply/error (domain/parse-reply "{not json"))))
   (is (= :reply/not-an-object (:reply/error (domain/parse-reply "[1]")))))
 
@@ -142,7 +180,33 @@
     (ports/route! o {:command :olympus/prev-tab})
     (ports/route! o {:command :olympus/refresh})
     (is (= {:reply/error :reply/unparseable} (ports/route! o {:reply/error :reply/unparseable})))
-    (is (= [[:focus "a"] [:focus nil] [:next-tab] [:prev-tab] [:refresh]] @(:calls o)))))
+    (is (= [[:focus "a"] [:focus nil] [:next-tab] [:prev-tab] [:refresh]] @(:calls o))))
+  (testing "an invoke routes through the InvokeRouter, never the olympus port"
+    (let [o    (recording)
+          runs (atom [])
+          router (boundary/registry-invoke-router
+                  {:registry-fn (constantly (lens/make-registry []))
+                   :config      {:mount/dependencies {}}
+                   :verb-fn     (fn [panel verb]
+                                  (when (= ["kanban" "open"] [panel verb])
+                                    (fn [invoke] (swap! runs conj invoke))))
+                   :warn!       (fn [_ _])})]
+      (is (= {:routed :invoke :result true}
+             (ports/route! o router {:command :invoke
+                                     :invoke {"panel" "kanban" "verb" "open"
+                                              "row" "t1" "payload" {}}})))
+      (is (= [{"panel" "kanban" "verb" "open" "row" "t1" "payload" {}}] @runs))
+      (is (= {:routed :invoke :result false}
+             (ports/route! o router {:command :invoke
+                                     :invoke {"panel" "kanban" "verb" "nope"
+                                              "row" nil "payload" {}}}))
+          "an unknown verb is ignored with a warning, not a wire error")
+      (is (= {:routed :invoke :result false}
+             (ports/route! o router {:command :invoke
+                                     :invoke {"panel" "ghost" "verb" "open"
+                                              "row" nil "payload" {}}}))
+          "an unknown panel is ignored with a warning")
+      (is (= [] @(:calls o)) "olympus is untouched by invokes"))))
 
 (defprotocol ProbePort
   (probe! [port payload]))
@@ -471,3 +535,233 @@
         (is (= "retry: 2000" (next-line q)))
         (is (= "" (next-line q)))
         (is (= ": ping" (next-line q)))))))
+
+
+(def lens-calls (atom []))
+
+(defn lens-stub-ctor [_]
+  (hive-addon/make-addon
+   {:mcp-call (fn [_server _tool _args]
+                {:content [{:type "text" :text "ROWS"}]})
+    :json-parse (fn [_] [{:id "task-42" :title "Task" :status "todo"
+                           :priority "high" :project "proj"}])
+    :panel! (fn [op] (swap! lens-calls conj
+                            (update op :panel/rows
+                                    (fn [rows] (mapv #(assoc % :payload {:task 42}) rows))))
+                    true)
+    :log! (fn [level msg] (swap! lens-calls conj [level msg]))
+    :cwd (constantly "/w/proj")}))
+
+(defn- handshake-bridge?
+  "True when the hive-vessel bridge records per-client features (0.1.13+).
+   The production pin is 0.1.14; keep the probe for :dev against an older
+   sibling checkout."
+  []
+  (boolean (resolve 'hive-vessel.executor.sse/client-features)))
+
+(def feature-panel
+  "A lens-style show-panel: title, plain rows, dirge chords and a cursor."
+  {:op :ui/show-panel
+   :panel/id "kanban"
+   :doc {:doc/title "Kanban" :doc/blocks [{:block/type :para :text "No active tasks"}]}
+   :panel/rows [{:text "task-42" :face :row :id "task-42" :payload {:task 42}}]
+   :keys {"enter" {"invoke" "open"}}
+   :cursor true})
+
+(deftest mounted-kanban-lens-wire
+  (reset! lens-calls [])
+  (let [path (temp-discovery)
+        specs [(update (manifest "hive-dirge-host.edn") :addon/config assoc
+                       :dirge/discovery-path path :dirge/heartbeat-ms 100)
+               {:addon/id "hive.dirge" :addon/type :native
+                :addon/init-ns "hive-dirge.host-test" :addon/init-fn "lens-stub-ctor"
+                :addon/capabilities #{:dirge/lenses}}]
+        mounted (mount/atom-mount-host)
+        report (mount/mount! (mount/solve specs) mounted {:license-gate (constantly nil)})]
+    (try
+      (is (:ok? report) (pr-str report))
+      (is (= ["hive.dirge" "hive.dirge.host"] (:order report)))
+      (let [discovered (discovery path)
+            caps (get discovered "capabilities")
+            q (open-events-url (url discovered "/events"
+                                       (str (get discovered "token")
+                                            "&vessel=dirge&features=spans,keys,cursor")))
+            addon-instance (mount-port/registered mounted "hive.dirge")
+            dirge-host (mount-port/registered mounted "hive.dirge.host")]
+        (is (= 1 (get caps "version")))
+        (is (some #{"invoke"} (get caps "replies")))
+        (is (= ["focus" "open"] (get caps "invokes")))
+        (is (= {"invoke" "open"} (get-in caps ["keys" "enter"])))
+        (is (= "retry: 2000" (next-line q)))
+        ((get-in (addon/hooks addon-instance) [:dirge/commands "hive" :handler])
+         {:argv ["kanban"] :cwd "/w/proj"})
+        (let [op (first @lens-calls)
+              dispatch! (:vessel/dispatch! (addon/hooks dirge-host))]
+          (is (= "kanban" (:panel/id op)))
+          (is (contains? (dispatch! op) :ok))
+          (let [frame (fn []
+                        (when-let [f (read-frame q)]
+                          (when-let [d (get f "data")]
+                            (when (= "show" (get (wire/read-json d) "op"))
+                              f))))
+                data (wire/read-json (get (eventually frame) "data"))]
+            (is (= "kanban" (get data "id")))
+            (is (= "show" (get data "op")))
+            (is (= "hive kanban" (get-in data ["doc" "title"])))
+            (is (= (when (handshake-bridge?) true) (get data "cursor")))
+            (is (= (when (handshake-bridge?) {"invoke" "open"})
+                   (get-in data ["keys" "enter"])))
+            (is (nil? (get data "spans"))
+                "span rows ride inside \"lines\", never a top-level \"spans\"")
+            (if (handshake-bridge?)
+              (do (is (some #(and (= "task-42" (get % "id"))
+                                  (= {"task" 42} (get % "payload")))
+                            (get data "lines"))
+                      "lens rows pass through with their ids and payloads")
+                  (is (some #(and (nil? (get % "spans"))
+                                  (str/includes? (get % "text") "task-42"))
+                            (get data "lines"))
+                      "span rows flatten to plain {text, face, id} lines"))
+              (do (is (every? #(nil? (get % "spans")) (get data "lines"))
+                      "pre-handshake hive-vessel renders plain lines only")
+                  (is (some #(= "task-42" (get % "id")) (get data "lines"))
+                      "row ids survive on plain lines")))))
+        (is (= 202 (post-reply discovered
+                               "{\"action\":\"invoke\",\"panel\":\"kanban\",\"verb\":\"open\",\"row\":\"task-42\",\"payload\":{}}")))
+        (is (eventually #(some #{[:info "kanban open task-42"]} @lens-calls)))
+        (is (= 202 (post-reply discovered "{\"action\":\"next-tab\"}"))))
+      (finally
+        (mount/teardown! mounted (:order report))))))
+
+;; =============================================================================
+;; Lens C3 handshake: :vessel/features and the feature-gated panel feed
+;; =============================================================================
+
+(deftest feature-set-version-is-1
+  (is (= 1 domain/feature-set-version)))
+
+(deftest panel-message-degrades-to-plain-lines-without-features
+  (let [m (host/panel-message #{} feature-panel)]
+    (is (= "ui/show-panel" (get m "op")))
+    (is (= "kanban" (get m "panel/id")))
+    (is (= "Kanban" (get-in m ["doc" "doc/title"])))
+    (is (= "Kanban" (get-in m ["lines" 0 "text"])))
+    (is (= {"task" 42} (get-in m ["lines" 1 "payload"])))
+    (is (= "task-42" (get-in m ["lines" 1 "id"]))
+        "row ids survive on plain lines even with no client features")
+    (is (nil? (get m "spans")))
+    (is (nil? (get m "keys")))
+    (is (nil? (get m "cursor"))))
+  (is (= (json/show-panel-message {:op :ui/show-panel
+                                   :panel/id "p"
+                                   :doc {:doc/title "T" :doc/blocks []}})
+         (host/panel-message nil {:op :ui/show-panel
+                                  :panel/id "p"
+                                  :doc {:doc/title "T" :doc/blocks []}}))
+      "a doc-only panel with no client degrades to the plain dialect message"))
+
+(deftest panel-message-upgrades-with-advertised-features
+  (let [m (host/panel-message #{:spans :keys :cursor} feature-panel)]
+    (is (= "show" (get m "op")))
+    (is (= "kanban" (get m "id")))
+    (is (= "Kanban" (get-in m ["doc" "title"])))
+    (is (= {"task" 42} (get-in m ["lines" 1 "payload"])))
+    (is (nil? (get m "spans"))
+        "dirge reads span rows inside \"lines\", never a top-level \"spans\"")
+    (is (= {"invoke" "open"} (get-in m ["keys" "enter"])))
+    (is (= true (get m "cursor"))))
+  (testing "a span-bearing lens row survives v2 and flattens for legacy"
+    (let [op (assoc feature-panel :panel/rows
+                    [{:id "task-42" :face :row :payload {:task 42}
+                      :spans [{:text "Task " :face :row}
+                              {:text "42" :face :warn}]}])
+          rich (host/panel-message #{:spans} op)
+          plain (host/panel-message #{} op)]
+      (is (= [{"text" "Task " "face" "row"}
+              {"text" "42" "face" "warn"}]
+             (get-in rich ["lines" 1 "spans"])))
+      (is (= "task-42" (get-in rich ["lines" 1 "id"])))
+      (is (= {"task" 42} (get-in rich ["lines" 1 "payload"])))
+      (is (= "Task 42" (get-in plain ["lines" 1 "text"])))
+      (is (nil? (get-in plain ["lines" 1 "spans"])))
+      (is (= "task-42" (get-in plain ["lines" 1 "id"])))
+      (is (= {"task" 42} (get-in plain ["lines" 1 "payload"])))))
+  (testing "two-arity vessel renderer puts doc spans inside lines when available"
+    (let [op {:op :ui/show-panel :panel/id "doc"
+              :doc {:doc/title "Title" :doc/blocks [{:block/type :para :text "Body"}]}}
+          message (host/panel-message #{:spans} op)
+          two-arity? (some #{2} (:arglists (meta (resolve 'hive-vessel.dialect.json/show-panel-message))))]
+      (is (nil? (get message "spans")))
+      (is (= (boolean two-arity?) (boolean (some #(get % "spans") (get message "lines")))))))
+  (testing "an unadvertised feature never leaks"
+    (is (nil? (get (host/panel-message #{:keys} feature-panel) "spans")))
+    (is (nil? (get (host/panel-message #{:cursor} feature-panel) "keys")))
+    (is (nil? (get (host/panel-message #{} feature-panel) "cursor"))))
+  (testing "an op without chords or cursor carries no keys/cursor fields"
+    (let [m (host/panel-message #{:keys :cursor}
+                                {:op :ui/show-panel :panel/id "p"
+                                 :doc {:doc/title "T" :doc/blocks []}})]
+      (is (nil? (get m "keys")))
+      (is (nil? (get m "cursor"))))))
+
+(deftest target-features-start-empty-and-follow-subscriptions
+  (let [path (temp-discovery)]
+    (with-host [a {:dirge/discovery-path path :dirge/olympus (recording)}]
+      (let [target ((:vessel/target (addon/hooks a)))]
+        (is (= :dirge (:vessel/id target)))
+        (is (= #{} (:vessel/features target))
+            "no dirge client has subscribed yet"))
+      (let [doc (discovery path)
+            sub (fn [] (open-events-url (url doc "/events"
+                                             (str (get doc "token")
+                                                  "&vessel=dirge&features=spans,keys,cursor,open-file"))))
+            target-features (fn [] (:vessel/features ((:vessel/target (addon/hooks a)))))]
+        (sub)
+        (if (handshake-bridge?)
+          (is (eventually
+               (fn []
+                 (= #{:spans :keys :cursor :open-file} (target-features))))
+              "the bridge records the parsed features per client; the target answers them")
+          (is (eventually
+               (fn [] (= #{} (target-features))))
+              "pre-handshake hive-vessel: the resolve fallback degrades to #{}"))))))
+
+(deftest show-panel-feed-degrades-without-features-and-upgrades-with-them
+  (let [path (temp-discovery)]
+    (with-host [a {:dirge/discovery-path path :dirge/olympus (recording)
+                   :dirge/heartbeat-ms 100}]
+      (let [doc (discovery path)
+            plain-q (open-events doc)
+            dispatch! (:vessel/dispatch! (addon/hooks a))
+            message-when (fn [pred q]
+                           (fn []
+                             (when-let [frame (read-frame q)]
+                               (when-let [m (get frame "data")]
+                                 (let [parsed (wire/read-json m)]
+                                   (when (pred parsed) parsed))))))
+            plain? (fn [m] (and (= "ui/show-panel" (get m "op"))
+                                (= "kanban" (get m "panel/id"))
+                                (nil? (get m "keys"))
+                                (nil? (get m "cursor"))
+                                (every? #(nil? (get % "spans")) (get m "lines"))
+                                (= {"task" 42} (get-in m ["lines" 1 "payload"]))))
+            rich? (fn [m] (and (= "show" (get m "op"))
+                               (= "kanban" (get m "id"))
+                               (= {"invoke" "open"} (get-in m ["keys" "enter"]))
+                               (= true (get m "cursor"))
+                               (some #(and (= "task-42" (get % "id"))
+                                           (= {"task" 42} (get % "payload")))
+                                     (get m "lines"))))]
+        (is (= "retry: 2000" (next-line plain-q)))
+        (is (contains? (dispatch! feature-panel) :ok))
+        (is (eventually (message-when plain? plain-q) 5000)
+            "the unfeatured client gets legacy names and plain lines before a rich subscription")
+        (let [rich-q (open-events-url (url doc "/events"
+                                           (str (get doc "token")
+                                                "&vessel=dirge&features=spans,keys,cursor")))]
+          (is (= "retry: 2000" (next-line rich-q)))
+          ;; The bridge uses the union of connected client features. The next
+          ;; broadcast upgrades both streams; it does not lower per recipient.
+          (is (contains? (dispatch! feature-panel) :ok))
+          (is (eventually (message-when rich? plain-q) 5000))
+          (is (eventually (message-when rich? rich-q) 5000)))))))
