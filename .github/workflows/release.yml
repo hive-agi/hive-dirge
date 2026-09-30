@@ -38,16 +38,34 @@ jobs:
         with:
           fetch-depth: 0
 
+      # A queued run's event sha can predate a release commit that landed
+      # while it waited. Release the branch tip, never the event sha, and
+      # skip when that tip is already a tagged release.
+      - name: Sync to branch tip
+        id: sync
+        run: |
+          git fetch --tags --force origin "$GITHUB_REF_NAME"
+          git checkout -B "$GITHUB_REF_NAME" FETCH_HEAD
+          if git tag --points-at HEAD | grep -q '^v'; then
+            echo "skip: HEAD $(git rev-parse --short HEAD) is already released"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/setup-java@v5
+        if: steps.sync.outputs.skip != 'true'
         with:
           distribution: temurin
           java-version: '21'
 
       - uses: DeLaGuardo/setup-clojure@13.7.0
+        if: steps.sync.outputs.skip != 'true'
         with:
           cli: latest
 
       - uses: actions/cache@v5
+        if: steps.sync.outputs.skip != 'true'
         with:
           path: ~/.m2/repository
           key: m2-${{ runner.os }}-${{ hashFiles('deps.edn') }}
@@ -56,6 +74,7 @@ jobs:
       # Gate BEFORE the bump: a published pom is immutable, so a red suite
       # must not be able to mint a version, tag it and ship it.
       - name: Test
+        if: steps.sync.outputs.skip != 'true'
         run: |
           if [ -d test ]; then
             clojure -M:test
@@ -63,15 +82,36 @@ jobs:
             echo "no test/ directory — nothing to gate on"
           fi
 
+      # Bump from max(VERSION, latest v* tag), so a tag minted by a run that
+      # failed before committing VERSION is never reused.
+      - name: Floor VERSION at the latest tag
+        if: steps.sync.outputs.skip != 'true'
+        run: |
+          cur=$(tr -d '[:space:]' < VERSION)
+          latest=$(git tag -l 'v*' --sort=-v:refname | head -n1 | sed 's/^v//')
+          if [ -n "$latest" ] && [ "$(printf '%s\n%s\n' "$cur" "$latest" | sort -V | tail -n1)" != "$cur" ]; then
+            echo "VERSION $cur lags tag v$latest; bumping from $latest"
+            printf '%s\n' "$latest" > VERSION
+          fi
+
       - name: Bump patch version
-        run: clojure -T:build bump :level :patch
+        if: steps.sync.outputs.skip != 'true'
+        run: |
+          clojure -T:build bump :level :patch
+          VER=$(tr -d '[:space:]' < VERSION)
+          if git rev-parse -q --verify "refs/tags/v$VER" >/dev/null; then
+            echo "::error::tag v$VER already exists; refusing to re-release it"
+            exit 1
+          fi
 
       # After the bump and before the tag, so the pending version describes
       # itself.
       - name: Regenerate changelog
+        if: steps.sync.outputs.skip != 'true'
         run: clojure -T:build changelog
 
       - name: Commit and tag
+        if: steps.sync.outputs.skip != 'true'
         run: |
           set -euo pipefail
           VER=$(cat VERSION)
@@ -83,9 +123,11 @@ jobs:
           # Annotated: `git push --follow-tags` ignores lightweight tags,
           # which would publish the artifact and silently drop the tag.
           git tag -a "v$VER" -m "release $VER"
-          git push --follow-tags
+          # Atomic: branch and tag land together or neither does.
+          git push --atomic origin "HEAD:refs/heads/$GITHUB_REF_NAME" "refs/tags/v$VER"
 
       - name: Deploy
+        if: steps.sync.outputs.skip != 'true'
         env:
           # deps-deploy and hive-build both read CLOJARS_PASSWORD; the org
           # secret is CLOJARS_DEPLOY_TOKEN. Map one onto the other.
