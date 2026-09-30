@@ -51,3 +51,11 @@
   [op]
   (when-let [f (harness-fn "panel")]
     (f op)))
+
+(defn refresh!
+  "Asks dirge to re-read every addon's tools and hooks once the current call
+   returns. True when asked; nil outside dirge."
+  []
+  (when-let [f (harness-fn "refresh!")]
+    (f)
+    true))

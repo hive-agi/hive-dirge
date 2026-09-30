@@ -11,7 +11,8 @@
   (:require [hive-addon.protocol :as p]
             [hive-dirge.harness :as h]
             [hive-dirge.hive.domain :as d]
-            [hive-dirge.lens.registry :as lens]))
+            [hive-dirge.lens.registry :as lens]
+            [hive-dirge.live :as live]))
 
 (def addon-id-str "hive.dirge")
 
@@ -181,6 +182,41 @@
   [state]
   (or (:config @state) (d/resolve-config nil)))
 
+(defn tool-list
+  "The addon's tools, built per call so a refresh sees REPL redefinitions."
+  [{:keys [state ports]}]
+  (live/tools-with addon-id-str (tool-defs (live/ports ports) #(current-config state))))
+
+(defn- invoke-hook
+  "The in-dirge half of invoke routing: runs the owning lens's verb, warns
+   and answers false for an unknown panel or verb."
+  [registry ports {:keys [panel verb row payload] :or {payload {}}}]
+  (let [routed (lens/route-invoke registry {:panel panel :verb verb :row row :payload payload})]
+    (if (:invoke/routed routed)
+      (do ((:effects routed) ports) true)
+      (do (when-let [log! (:log! ports)]
+            (log! :warn (str "hive invoke ignored: " verb " on " panel)))
+          false))))
+
+(defn hook-map
+  "The addon's hooks, built per call so a refresh sees REPL redefinitions."
+  [{:keys [state ports registry]}]
+  (let [ports (live/ports ports)
+        cfg   #(current-config state)]
+    (live/hooks-with
+     addon-id-str
+     {:dirge/system-prompt    (fn [_] (d/system-prompt (cfg)))
+      :dirge/session-start    (fn [ctx] (session-start ports (cfg) ctx))
+      :dirge/session-end      (fn [ctx] (session-end ports (cfg) ctx))
+      :dirge/commands         {"hive" {:description "hive: catchup | wrap | kanban [status] | swarm [scope] | lens [name] | memory <query> | shout <message>"
+                                       :handler     (fn [ctx] (run-command registry ports (cfg) ctx))}}
+      :dirge/lenses           (fn [] (vec (lens/list-lenses registry)))
+      :dirge/register-lenses! (fn [lenses]
+                                (swap! (:lens-registry @state) #(lens/with-builtins % lenses))
+                                nil)
+      :dirge/invoke           (fn [ctx] (invoke-hook registry ports ctx))
+      :dirge/command-hooks    {"guard" (fn [ctx] (guard-hook ports (cfg) ctx))}})))
+
 (defrecord HiveDirgeAddon [state ports registry]
   p/IAddon
   (addon-id [_] addon-id-str)
@@ -192,8 +228,7 @@
   (shutdown! [_]
     (swap! state assoc :initialized? false)
     {:success? true :errors []})
-  (tools [_]
-    (tool-defs ports #(current-config state)))
+  (tools [this] (tool-list this))
   (schema-extensions [_] {})
   (health [_]
     (let [s @state]
@@ -201,35 +236,7 @@
         {:status :ok :details {:server (get-in s [:config :hive/server])}}
         {:status :down :details {:reason :not-initialized}})))
   (excluded-tools [_] #{})
-  (hooks [_]
-    {:dirge/system-prompt (fn [_] (d/system-prompt (current-config state)))
-     :dirge/session-start (fn [ctx] (session-start ports (current-config state) ctx))
-     :dirge/session-end   (fn [ctx] (session-end ports (current-config state) ctx))
-     :dirge/commands      {"hive" {:description "hive: catchup | wrap | kanban [status] | swarm [scope] | lens [name] | memory <query> | shout <message>"
-                                   :handler     (fn [ctx]
-                                                  (run-command registry ports (current-config state) ctx))}}
-     :dirge/lenses        (fn [] (vec (lens/list-lenses registry)))
-     :dirge/register-lenses! (fn [lenses]
-                               (swap! (:lens-registry @state)
-                                      #(lens/with-builtins % lenses))
-                               nil)
-     :dirge/invoke        (fn [{:keys [panel verb row payload] :or {payload {}}}]
-                            ;; The in-dirge half of invoke routing: the lens
-                            ;; registry owns the panel ids, so the verb runs
-                            ;; here. A reply the host already routed (panel
-                            ;; owned there) never reaches this hook. Unknown
-                            ;; panel or verb: warn and ignore.
-                            (let [routed (lens/route-invoke registry {:panel panel
-                                                                      :verb verb
-                                                                      :row row
-                                                                      :payload payload})]
-                              (if (:invoke/routed routed)
-                                (do ((:effects routed) ports) true)
-                                (do (when-let [log! (:log! ports)]
-                                      (log! :warn (str "hive invoke ignored: " verb
-                                                       " on " panel)))
-                                    false))))
-     :dirge/command-hooks {"guard" (fn [ctx] (guard-hook ports (current-config state) ctx))}}))
+  (hooks [this] (hook-map this)))
 
 (defn make-addon
   "An uninitialized addon over `ports`. REGISTRY defaults to the built-in
@@ -242,7 +249,8 @@
                        ports (fn [] (@live))))))
 
 (defn addon-ctor
-  "Manifest :addon/init-fn: config -> uninitialized IAddon bound to
-   dirge.harness. Config is applied by initialize!."
+  "Manifest :addon/init-fn: config -> uninitialized IAddon whose ports are
+   read from `harness-ports` per call, registered in hive-dirge.live for the
+   REPL. Config is applied by initialize!."
   [_config]
-  (make-addon harness-ports))
+  (live/register! addon-id-str (make-addon (fn [] harness-ports))))

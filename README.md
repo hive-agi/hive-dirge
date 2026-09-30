@@ -88,13 +88,15 @@ deps.edn                               clojure + hive-addon + hive-dsl; :dev, :t
 version.edn, VERSION                   hive-build release config (:publish :clojars)
 src/hive_dirge/hive/addon.cljc         hive.dirge IAddon (record HiveDirgeAddon): /hive, tools, effects via a ports map
 src/hive_dirge/hive/domain.cljc        pure: config, /hive parsing, MCP requests, answers -> text and panels
-src/hive_dirge/harness.cljc            dirge.harness from portable code (notify, mcp-call, panel!, ...)
+src/hive_dirge/harness.cljc            dirge.harness from portable code (notify, mcp-call, panel!, refresh!, ...)
+src/hive_dirge/live.cljc               live addon instances + tools/hooks added from the REPL (defonce atoms)
+src/hive_dirge/dev.cljc                REPL helpers: inspect, add-tool!/add-hook!, refresh!
 src/hive_dirge/probe/addon.cljc        probe IAddon (record DirgeProbeAddon, ctor addon-ctor)
 src/hive_dirge/economy/addon.cljc      hive.dirge.economy IAddon: hooks + context_retrieve, wiring only
 src/hive_dirge/economy/ports.cljc      IObservationLog, IObservationIndex, IDigestor
 src/hive_dirge/economy/{domain,digest,markdown}.cljc
                                        pure: Observation/Handle, Digest build + budget fit, markdown render/parse
-src/hive_dirge/economy/pipeline/       observe (after-tool-call), retrieve (tool), compact (compact hooks)
+src/hive_dirge/economy/pipeline/       watch (:dirge/event), observe, retrieve (tool), compact (compact hooks)
 src/hive_dirge/economy/adapters/       local observation log, structured digestor
 src/hive_dirge/economy/registry.cljc   strategy registry selected by :addon/config
 src/hive_dirge/host.clj                hive.dirge.host IAddon (JVM); host/{domain,ports,boundary}.clj strata
@@ -143,10 +145,12 @@ from the dirge release "dirge addon session hooks" (older dirge ignores them;
 `hive.dirge.economy` (manifest `hive-dirge-economy.edn`) keeps a session's
 context bounded without losing what was folded away:
 
-- `:dirge/after-tool-call` logs every tool result under a short content handle
-  (`§1a2b3c4d`), in memory and in `.dirge/economy/<session>.edn`. The
+- `:dirge/event` only watches. A `:tool-call` and its `:tool-result` (paired
+  by `:id`) are logged as one result under a short content handle
+  (`§1a2b3c4d`), in memory and in `.dirge/economy/<session>.edn`. Turn, usage,
+  run and compaction events are counted into the addon's health details. The
   `context_retrieve` tool reads a handle back, either whole or as a line or
-  char range. The hook answers nil, so dirge appends nothing.
+  char range. The hook answers nil.
 - `:dirge/compact` receives `{:span [{:role :text :tool :tool-use-id} ...]
   :tokens :reason :focus :ctx-max :pressure :session-id}` and answers
   `{:summary markdown}`, or nil so that dirge's built-in summarizer runs. The
@@ -172,6 +176,21 @@ context bounded without losing what was folded away:
 The digestor is picked from a strategy registry by `:economy/digestor` in
 `:addon/config` (default `:structured`, which makes no model call). Adding a
 strategy means adding an entry to that map.
+
+## Developing from the REPL
+
+Both addons build their `tools` and `hooks` on every call, from vars and from
+`hive-dirge.live`, and read their harness ports at call time. Re-evaluating a
+defn and then asking dirge to refresh is enough; no re-initialize is needed.
+
+```clojure
+(require '[hive-dirge.dev :as dev])
+(dev/inspect)                                   ; every live addon: tools, hooks, health, extras
+(dev/add-hook! "hive.dirge" :dirge/on-prompt (fn [_] "hi"))
+(dev/add-tool! "hive.dirge.economy" {:name "probe" :description "p" :inputSchema {} :handler (fn [_] "ok")})
+(dev/reset-extras!)
+(dev/refresh!)                                  ; true inside dirge, false elsewhere
+```
 
 ## Portability rules for addon code
 
