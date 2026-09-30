@@ -23,6 +23,7 @@
    Anything else parses to an {:reply/error ..} value, is recorded and is
    answered 400 at once."
   (:require [clojure.string :as str]
+            [hive-dirge.sense.domain :as sense]
             [hive-dirge.lens.registry :as lens]
             [hive-vessel.wire :as wire]))
 
@@ -76,7 +77,7 @@
            "token" token}
     pid (assoc "pid" pid)
     lenses (assoc "capabilities" (merge {"version" 1
-                                          "replies" ["focus" "unfocus" "next-tab" "prev-tab" "refresh" "invoke"]}
+                                          "replies" ["focus" "unfocus" "next-tab" "prev-tab" "refresh" "invoke" "ack"]}
                                           (lens/capabilities-fragment lenses)))))
 
 (defn discovery-json [info] (wire/write-json (discovery-doc info)))
@@ -117,6 +118,9 @@
           command (get actions action)
           target (get message "target")]
       (cond
+        (= sense/ack-action action)
+        (sense/ack-command message)
+
         (nil? command)
         (if (= invoke-action action)
           (let [panel (get message "panel")

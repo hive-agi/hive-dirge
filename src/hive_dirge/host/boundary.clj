@@ -114,12 +114,15 @@
   "hive-vessel's SSE bridge on loopback, on a random port unless PORT, gated
    by TOKEN, refusing every Origin. Its /reply route is replaced by ours:
    ON-REPLY receives each admitted raw POST body and returns the HTTP status
-   to answer, so it must not block on the action it accepts."
-  [{:keys [port token on-reply heartbeat-ms]}]
+   to answer, so it must not block on the action it accepts. ON-CONNECT
+   (optional) runs after each subscriber is registered, so a broadcast made
+   from it reaches that subscriber."
+  [{:keys [port token on-reply on-connect heartbeat-ms]}]
   (let [bridge (sse/start! (cond-> {:port (or port 0)
                                     :token token
                                     :allowed-origin? refuse-every-origin}
-                             heartbeat-ms (assoc :heartbeat-ms heartbeat-ms)))
+                             heartbeat-ms (assoc :heartbeat-ms heartbeat-ms)
+                             on-connect (assoc :on-connect on-connect)))
         ^HttpServer server (:server bridge)]
     (.removeContext server ^String reply-path)
     (.createContext server ^String reply-path ^HttpHandler (reply-handler token on-reply))
@@ -128,6 +131,12 @@
 (defn stop-bridge! [bridge] (when bridge (sse/stop! bridge)))
 
 (defn executor [bridge] (sse/executor bridge))
+
+(defn broadcast!
+  "Send one JSON-ready MESSAGE to every connected client, outside the vessel
+   translator registry (loop ops are already wire values)."
+  [bridge message]
+  (sse/broadcast! bridge message))
 
 (defn client-features
   "The UNION of every connected dirge client's advertised feature set (a set

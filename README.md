@@ -50,6 +50,36 @@ Install: symlink this checkout into dirge's addon directory, then run
 ln -s "$PWD" ~/.config/dirge/addons/hive-dirge
 ```
 
+## hive.dirge.host: hive senses in dirge's agent loop
+
+MCP piggyback blocks reach the dirge model only inside the result of the
+next hive tool call, as text the model may or may not act on. The sense
+relay is the push path: it changes the control flow of the running loop.
+
+hive-agent's sixth-sense turns hivemind shouts into *senses*: a ling asks,
+is blocked, failed, completed, or ran out of context. The host listens on
+sixth-sense (`hive-agent.sixth-sense.api/listen!`), drains a consume-once
+batch for consumer `dirge`, and sends each sense as one loop op on the SSE
+feed dirge already subscribes to:
+
+| op | what dirge does | default for |
+|---|---|---|
+| `loop/steer` | injects it before the next model call of the running turn, or starts a turn when idle | ask, blocked, error |
+| `loop/interject` | ends the running turn at its next boundary; the message opens the next one | context-death |
+| `loop/followup` | delivers it when the current run finishes, or starts a run when idle | completed |
+
+Each op carries `prompt`, the text the model reads, including how to
+answer (`swarm` `ss reply` to the ask id or agent id). dirge acknowledges
+every op it injected with the reply `{"action":"ack","target":<sense id>}`.
+Unacknowledged ops are sent again when a client reconnects. Nothing is
+drained while no connected client subscribed with the `loop` feature, so
+the senses stay in sixth-sense (persisted) until one does.
+
+Config on `hive.dirge.host`: `:dirge/senses?` (default true),
+`:dirge/sense-policy` (for example `{"completed" "steer", "error" "ignore"}`)
+and `:dirge/sense-receptor` (a sixth-sense receptor, for example
+`{:parent "coordinator"}`).
+
 ## Layout
 
 ```

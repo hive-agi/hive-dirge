@@ -22,6 +22,16 @@
      :dirge/action-queue     (fn [run-command] IActionQueue) holding accepted
                              commands (default: one worker thread over a
                              FIFO of domain/reply-queue-capacity)
+     :dirge/senses?          relay hive senses into dirge's agent loop
+                             (default true; see hive-dirge.sense.relay)
+     :dirge/sense-policy     sense class -> loop mode overrides, e.g.
+                             {\"completed\" \"steer\"} (hive-dirge.sense.domain)
+     :dirge/sense-receptor   sixth-sense receptor the relay drains through
+     :dirge/sense-source     an ISenseSource replacing sixth-sense (tests)
+
+   Loop feed: a client that subscribes with the `loop` feature receives
+   hive senses as loop/steer, loop/interject and loop/followup ops and acks
+   each one it injected with {\"action\": \"ack\", \"target\": sense-id}.
 
    Feature handshake (Lens C3): a dirge client may subscribe with
    `?features=spans,keys,cursor,open-file`; hive-vessel's bridge records the
@@ -37,6 +47,8 @@
             [hive-dirge.host.boundary :as boundary]
             [hive-dirge.host.domain :as domain]
             [hive-dirge.host.ports :as ports]
+            [hive-dirge.sense.domain :as sense]
+            [hive-dirge.sense.relay :as relay]
             [hive-vessel.core :as v]
             [hive-vessel.dialect.json :as json]
             [hive-vessel.wire :as wire]))
@@ -163,15 +175,32 @@
 
 (defn- on-reply-fn
   "Raw POST body -> parsed command -> offered to QUEUE; returns the HTTP
-   status at once. Refusals are recorded here, routed outcomes by the worker."
+   status at once. Refusals are recorded here, routed outcomes by the worker.
+   A sense ack never queues: it only releases a pending op of the relay."
   [state queue]
   (fn [raw]
-    (let [command (domain/parse-reply raw)
-          outcome (domain/reply-outcome command
-                                        (and (not (:reply/error command))
-                                             (ports/submit! queue command)))]
-      (when (:reply/error outcome) (record! state outcome))
-      (domain/reply-status outcome))))
+    (let [command (domain/parse-reply raw)]
+      (if (= :sense/ack (:command command))
+        (do (some-> (:relay @state) (relay/ack! (:sense-id command)))
+            202)
+        (let [outcome (domain/reply-outcome command
+                                            (and (not (:reply/error command))
+                                                 (ports/submit! queue command)))]
+          (when (:reply/error outcome) (record! state outcome))
+          (domain/reply-status outcome))))))
+
+(defn- start-relay
+  "The sense relay over BRIDGE, or nil when :dirge/senses? is false.
+   :dirge/sense-source overrides the sixth-sense adapter (tests)."
+  [config bridge]
+  (when-not (false? (:dirge/senses? config))
+    (relay/start! {:source (if (contains? config :dirge/sense-source)
+                             (:dirge/sense-source config)
+                             (relay/sixth-sense-source))
+                   :broadcast! (fn [op] (boundary/broadcast! bridge op))
+                   :loop-client? (fn [] (contains? (boundary/client-features bridge) sense/feature))
+                   :policy (sense/->policy (:dirge/sense-policy config))
+                   :receptor (:dirge/sense-receptor config)})))
 
 (defn- start! [state seed runtime-config]
   (locking state
@@ -190,7 +219,8 @@
             bridge (boundary/start-bridge! {:port (:dirge/port config)
                                             :token token
                                             :heartbeat-ms (:dirge/heartbeat-ms config)
-                                            :on-reply (on-reply-fn state queue)})]
+                                            :on-reply (on-reply-fn state queue)
+                                            :on-connect (fn [_] (some-> (:relay @state) relay/connected!))})]
         (try
           (boundary/write-private! path (domain/discovery-json
                                          {:port (:port bridge) :token token
@@ -208,7 +238,8 @@
                 target (domain/target (boundary/executor bridge))]
             (swap! state assoc
                    :lifecycle :active :bridge bridge :queue queue :discovery path
-                   :registry registry :target target :replies [])
+                   :registry registry :target target :replies []
+                   :relay (start-relay config bridge))
             {:success? true
              :errors []
              :metadata {:port (:port bridge) :discovery path}})
@@ -220,8 +251,9 @@
 
 (defn- stop! [state]
   (locking state
-    (let [{:keys [lifecycle bridge queue discovery]} @state]
+    (let [{:keys [lifecycle bridge queue discovery relay]} @state]
       (when (= :active lifecycle)
+        (some-> relay relay/stop!)
         (boundary/stop-bridge! bridge)
         (ports/close! queue)
         (try (boundary/delete-file! discovery) (catch Throwable _ nil)))
@@ -229,7 +261,7 @@
       nil)))
 
 (defn- health-of [state]
-  (let [{:keys [lifecycle bridge discovery replies last-error]} @state]
+  (let [{:keys [lifecycle bridge discovery replies last-error relay]} @state]
     {:status (case lifecycle
                :active (if (pos? (:clients (boundary/bridge-status bridge))) :ok :degraded)
                :failed :down
@@ -239,6 +271,7 @@
                               {:discovery discovery
                                :replies (count replies)
                                :reply-errors (count (filter :reply/error replies))})
+                relay (assoc :senses (relay/status relay))
                 last-error (assoc :last-error last-error))}))
 
 (defrecord DirgeHostAddon [state seed]
@@ -259,7 +292,8 @@
          :vessel/dispatch! (fn [op-or-ops] (v/dispatch! registry target op-or-ops))
          :vessel/register-translators! (fn [translators] (swap! registry v/register-all translators) nil)
          :dirge/bridge (fn [] (boundary/bridge-status bridge))
-         :dirge/replies (fn [] (:replies @state))}
+         :dirge/replies (fn [] (:replies @state))
+         :dirge/senses (fn [] (some-> (:relay @state) relay/status))}
         {}))))
 
 (defn addon-ctor
