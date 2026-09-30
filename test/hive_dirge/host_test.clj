@@ -243,6 +243,36 @@
       (finally
         (remove-method ports/route-command ::boom)))))
 
+(deftest action-command-registry
+  (testing "the five olympus actions and invoke are registered by default"
+    (is (= #{"focus" "unfocus" "next-tab" "prev-tab" "refresh" "invoke"}
+           (domain/registered-actions))))
+  (testing "an unregistered action stays a wire error"
+    (doseq [a ["rm -rf" "" "FOCUS" "probe" nil 7]]
+      (is (= {:reply/error :reply/unknown-action :reply/action a}
+             (domain/message->command {"action" a})))))
+  (testing "an addon adds an action and its command without editing message->command"
+    (defmethod domain/action->command "probe" [_ message]
+      {:command ::probe :payload (get message "payload")})
+    (defmethod ports/route-command ::probe [port cmd] (probe! port (:payload cmd)))
+    (try
+      (is (contains? (domain/registered-actions) "probe"))
+      (is (some #{"probe"} (get-in (domain/discovery-doc {:port 1 :token "t"
+                                                          :lenses (lens/make-registry [])})
+                                   ["capabilities" "replies"]))
+          "discovery advertises every registered action")
+      (let [cmd (domain/parse-reply "{\"action\":\"probe\",\"payload\":42}")
+            p (->RecordingProbe (atom []))]
+        (is (= {:command ::probe :payload 42} cmd))
+        (is (= {:routed ::probe :result :probed} (ports/route! p cmd)))
+        (is (= [[:probe 42]] @(:calls p))))
+      (finally
+        (remove-method domain/action->command "probe")
+        (remove-method ports/route-command ::probe)))
+    (is (not (contains? (domain/registered-actions) "probe")))
+    (is (= :reply/unknown-action
+           (:reply/error (domain/parse-reply "{\"action\":\"probe\"}"))))))
+
 ;; =============================================================================
 ;; Discovery file
 ;; =============================================================================
@@ -332,6 +362,24 @@
         (is (= [[:focus "ling-7"] [:next-tab] [:refresh] [:focus nil]] @(:calls o)))
         (is (eventually #(= 7 (count ((:dirge/replies (addon/hooks a)))))))
         (is (= 3 (count (filter :reply/error ((:dirge/replies (addon/hooks a)))))))))))
+
+(deftest a-registered-action-reaches-the-port-over-the-wire
+  (defmethod domain/action->command "double-refresh" [_ _] {:command ::double-refresh})
+  (defmethod ports/route-command ::double-refresh [port _]
+    (ports/refresh! port)
+    (ports/refresh! port))
+  (try
+    (let [path (temp-discovery)
+          o (recording)]
+      (with-host [a {:dirge/discovery-path path :dirge/olympus o}]
+        (let [doc (discovery path)]
+          (is (= 202 (post-reply doc "{\"action\":\"double-refresh\"}")))
+          (is (eventually #(= [[:refresh] [:refresh]] @(:calls o))))
+          (is (eventually #(= [{:routed ::double-refresh}]
+                              ((:dirge/replies (addon/hooks a)))))))))
+    (finally
+      (remove-method domain/action->command "double-refresh")
+      (remove-method ports/route-command ::double-refresh))))
 
 (deftest reply-refusals-are-synchronous
   (let [path (temp-discovery)

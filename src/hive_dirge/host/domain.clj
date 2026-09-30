@@ -18,6 +18,10 @@
    ignore-and-warn decision, never a wire error, so dirge keeps its defaults
    as C3 specifies.
 
+   The action set is open: action->command maps a wire action to a command
+   value, and an addon adds one with defmethod, paired with a
+   hive-dirge.host.ports/route-command method for its command.
+
    A well-formed reply is answered 202 as soon as it is queued; the action
    runs afterwards and its re-render reaches dirge on the SSE stream.
    Anything else parses to an {:reply/error ..} value, is recorded and is
@@ -65,6 +69,8 @@
    docs/lenses.md."
   1)
 
+(declare registered-actions)
+
 (defn discovery-doc
   "The discovery document (string keys, JSON-ready). It carries the token, so
    it is only ever written to a 0600 file and never logged."
@@ -76,7 +82,7 @@
            "token" token}
     pid (assoc "pid" pid)
     lenses (assoc "capabilities" (merge {"version" 1
-                                          "replies" ["focus" "unfocus" "next-tab" "prev-tab" "refresh" "invoke"]}
+                                          "replies" (vec (sort (registered-actions)))}
                                           (lens/capabilities-fragment lenses)))))
 
 (defn discovery-json [info] (wire/write-json (discovery-doc info)))
@@ -93,48 +99,66 @@
 ;; Reply wire -> command
 ;; =============================================================================
 
-(def actions
-  "Wire action -> command keyword. The five olympus actions are the closed
-   set routed to the IOlympusControl port."
-  {"focus" :olympus/focus
-   "unfocus" :olympus/unfocus
-   "next-tab" :olympus/next-tab
-   "prev-tab" :olympus/prev-tab
-   "refresh" :olympus/refresh})
-
 (def invoke-action
   "The wire action carrying a lens verb invocation."
   "invoke")
 
+(defmulti action->command
+  "The reply action registry: wire action string -> command value.
+
+   Dispatches on the action string; MESSAGE is the whole parsed reply
+   (string keys). The five olympus actions and \"invoke\" are registered
+   below; an addon adds an action by extending this method from its own
+   namespace, paired with a hive-dirge.host.ports/route-command method for
+   the command it returns, never by editing message->command:
+
+     (defmethod domain/action->command \"do-thing\" [_ message]
+       {:command :my-addon/do-thing :target (get message \"target\")})
+
+   A method answers {:command kw ...} or
+   {:reply/error reason :reply/action action}. An unregistered action is
+   {:reply/error :reply/unknown-action}."
+  (fn [action _message] action))
+
+(defn- present? [s] (and (string? s) (not (str/blank? s))))
+
+(defmethod action->command "focus" [action message]
+  (let [target (get message "target")]
+    (if (present? target)
+      {:command :olympus/focus :agent-id target}
+      {:reply/error :reply/missing-target :reply/action action})))
+
+(defmethod action->command "unfocus" [_ _] {:command :olympus/unfocus})
+(defmethod action->command "next-tab" [_ _] {:command :olympus/next-tab})
+(defmethod action->command "prev-tab" [_ _] {:command :olympus/prev-tab})
+(defmethod action->command "refresh" [_ _] {:command :olympus/refresh})
+
+(defmethod action->command invoke-action [action message]
+  (let [panel (get message "panel")
+        verb (get message "verb")]
+    (if (and (present? panel) (present? verb))
+      {:command :invoke
+       :invoke {"panel" panel
+                "verb" verb
+                "row" (get message "row")
+                "payload" (or (get message "payload") {})}}
+      {:reply/error :reply/malformed-invoke :reply/action action})))
+
+(defmethod action->command :default [action _]
+  {:reply/error :reply/unknown-action :reply/action action})
+
+(defn registered-actions
+  "The set of wire action strings action->command has a method for."
+  []
+  (disj (set (keys (methods action->command))) :default))
+
 (defn message->command
-  "A parsed reply MESSAGE (string-keyed map) as a command value:
-   {:command kw} plus :agent-id for :olympus/focus, :invoke fields for the
-   invoke action, or {:reply/error reason}."
+  "A parsed reply MESSAGE (string-keyed map) as a command value through the
+   action->command registry, or {:reply/error reason}."
   [message]
-  (if-not (map? message)
-    {:reply/error :reply/not-an-object}
-    (let [action (get message "action")
-          command (get actions action)
-          target (get message "target")]
-      (cond
-        (nil? command)
-        (if (= invoke-action action)
-          (let [panel (get message "panel")
-                verb  (get message "verb")]
-            (if (and (string? panel) (not (str/blank? panel))
-                     (string? verb) (not (str/blank? verb)))
-              {:command :invoke
-               :invoke  {"panel"   panel
-                         "verb"    verb
-                         "row"     (get message "row")
-                         "payload" (or (get message "payload") {})}}
-              {:reply/error :reply/malformed-invoke :reply/action action}))
-          {:reply/error :reply/unknown-action :reply/action action})
-        (= :olympus/focus command)
-        (if (and (string? target) (not (str/blank? target)))
-          {:command command :agent-id target}
-          {:reply/error :reply/missing-target :reply/action action})
-        :else {:command command}))))
+  (if (map? message)
+    (action->command (get message "action") message)
+    {:reply/error :reply/not-an-object}))
 
 (defn parse-reply
   "RAW (the POST body) as a command value; unparseable JSON is an error value."
