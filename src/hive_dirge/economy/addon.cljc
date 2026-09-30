@@ -5,10 +5,11 @@
   (:require [hive-addon.protocol :as p]
             [hive-dirge.economy.adapters.local :as local]
             [hive-dirge.economy.pipeline.compact :as compact]
-            [hive-dirge.economy.pipeline.observe :as observe]
             [hive-dirge.economy.pipeline.retrieve :as retrieve]
             [hive-dirge.economy.registry :as registry]
-            [hive-dirge.harness :as h]))
+            [hive-dirge.harness :as h]
+            [hive-dirge.economy.pipeline.watch :as watch]
+            [hive-dirge.live :as live]))
 
 (def addon-id-str "hive.dirge.economy")
 
@@ -18,19 +19,21 @@
 (defn- session-path
   [ports state]
   (let [{:keys [session-id cwd]} @state]
-    (local/spill-path (or cwd ((:cwd ports))) session-id)))
+    (local/spill-path (or cwd ((:cwd (live/ports ports)))) session-id)))
 
 (defn- fresh-session-id
   []
   (str "s" (rand-int 2147483647)))
 
 (defn make-env
-  "{:log :stats :digests} for the pipelines; the log spills under the session
-   cwd. :digests holds each session's last Digest (carry-forward)."
+  "{:log :stats :digests :pending} for the pipelines; the log spills under the
+   session cwd. :digests holds each session's last Digest (carry-forward),
+   :pending the args of tool calls whose result has not arrived yet."
   [ports state]
   {:log     (local/make-log (local/file-spill #(session-path ports state)))
    :stats   (atom {})
-   :digests (atom {})})
+   :digests (atom {})
+   :pending (atom {})})
 
 (defn compact-env
   "`env` plus the Digestor the addon config selects (registry, OCP) and the
@@ -40,7 +43,7 @@
     (assoc env
            :config config
            :digestor (registry/select :digestor config)
-           :now (:now ports))))
+           :now (:now (live/ports ports)))))
 
 (def retrieve-tool-schema
   {:type       "object"
@@ -64,6 +67,22 @@
          :cwd (or (:cwd ctx) (:cwd @state)))
   nil)
 
+(defn tool-list
+  "The addon's tools, built per call so a refresh sees REPL redefinitions."
+  [{:keys [env]}]
+  (live/tools-with addon-id-str (tool-defs env)))
+
+(defn hook-map
+  "The addon's hooks, built per call so a refresh sees REPL redefinitions.
+   Tool results, turns, usage and compactions are watched on :dirge/event."
+  [{:keys [state ports env]}]
+  (live/hooks-with
+   addon-id-str
+   {:dirge/session-start  (fn [ctx] (session-start state ctx))
+    :dirge/event          (fn [ctx] (watch/on-event env ctx))
+    :dirge/before-compact (fn [ctx] (compact/before-compact env ctx))
+    :dirge/compact        (fn [ctx] (compact/compact (compact-env env ports state) ctx))}))
+
 (defrecord HiveDirgeEconomyAddon [state ports env]
   p/IAddon
   (addon-id [_] addon-id-str)
@@ -78,18 +97,14 @@
   (shutdown! [_]
     (swap! state assoc :initialized? false)
     {:success? true :errors []})
-  (tools [_] (tool-defs env))
+  (tools [this] (tool-list this))
   (schema-extensions [_] {})
   (health [_]
     (if (:initialized? @state)
       {:status :ok :details (merge @(:stats env) (local/log-stats (:log env)))}
       {:status :down :details {:reason :not-initialized}}))
   (excluded-tools [_] #{})
-  (hooks [_]
-    {:dirge/session-start   (fn [ctx] (session-start state ctx))
-     :dirge/after-tool-call (fn [ctx] (observe/after-tool-call env ctx))
-     :dirge/before-compact  (fn [ctx] (compact/before-compact env ctx))
-     :dirge/compact         (fn [ctx] (compact/compact (compact-env env ports state) ctx))}))
+  (hooks [this] (hook-map this)))
 
 (defn make-addon
   ([ports] (make-addon ports {}))
@@ -98,6 +113,8 @@
      (->HiveDirgeEconomyAddon state ports (make-env ports state)))))
 
 (defn addon-ctor
-  "Manifest :addon/init-fn."
+  "Manifest :addon/init-fn. Ports are read from `harness-ports` per call and
+   the instance is registered in hive-dirge.live for the REPL."
   [config]
-  (make-addon harness-ports (if (map? config) config {})))
+  (live/register! addon-id-str
+                  (make-addon (fn [] harness-ports) (if (map? config) config {}))))
