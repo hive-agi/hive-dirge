@@ -80,6 +80,35 @@ Config on `hive.dirge.host`: `:dirge/senses?` (default true),
 and `:dirge/sense-receptor` (a sixth-sense receptor, for example
 `{:parent "coordinator"}`).
 
+## Checking the /swarm setup: `clojure -M:doctor`
+
+`/swarm` in dirge stays empty until both of these are done:
+
+1. hive-mcp mounted `hive.dirge.host` (hive-dirge is on its classpath), which
+   writes `$XDG_RUNTIME_DIR/hive-vessel/dirge.json`;
+2. dirge's `config.json` has `"panel_feed": {"discovery_dir": "hive-vessel"}`.
+
+The doctor checks both and prints a fix for each step that fails:
+
+```sh
+clojure -M:doctor
+clojure -M:doctor --discovery PATH --dirge-config PATH
+```
+
+```
+hive-dirge doctor: /swarm setup
+  [ok] step 1: hive.dirge.host is mounted: $XDG_RUNTIME_DIR/hive-vessel/dirge.json -> http://127.0.0.1:4100/vessel
+  [FAIL] step 2: ~/.config/dirge/config.json has no panel_feed
+         fix: add { "panel_feed": { "discovery_dir": "hive-vessel" } } to dirge's config.json, then restart dirge
+setup incomplete
+```
+
+Step 1 passes only when the discovery file is for vessel `dirge`, its pid is
+running and its port accepts connections. A leftover file from a hive-mcp
+that has exited fails as stale. When the file is missing, the doctor looks for
+running hive-mcp JVMs and reports whether any of them has hive-dirge on its
+classpath. It exits 0 when both steps pass and 1 otherwise.
+
 ## Layout
 
 ```
@@ -100,6 +129,8 @@ src/hive_dirge/economy/pipeline/       watch (:dirge/event), observe, retrieve (
 src/hive_dirge/economy/adapters/       local observation log, structured digestor
 src/hive_dirge/economy/registry.cljc   strategy registry selected by :addon/config
 src/hive_dirge/host.clj                hive.dirge.host IAddon (JVM); host/{domain,ports,boundary}.clj strata
+src/hive_dirge/doctor.clj              clojure -M:doctor: gathers facts through a ports map
+src/hive_dirge/doctor/domain.clj       pure: the two /swarm setup checks, report, render
 test/hive_dirge/host_test.clj          discovery 0600, token/Origin, reply routing, SSE frames, mount e2e
 resources/META-INF/hive-addons/
   hive-dirge.edn                       :addon/id "hive.dirge"
