@@ -3,16 +3,16 @@
 
         ;; IAddon contract (leaf lib). hive-dirge depends on the contract,
         ;; never on a host: no hive-mcp.* anywhere.
-        io.github.hive-agi/hive-addon {:mvn/version "1.0.14"}
+        io.github.hive-agi/hive-addon {:mvn/version "1.1.2"}
 
         ;; Result monad / rescue DSL, same pin as hive-addon.
-        io.github.hive-agi/hive-dsl {:mvn/version "0.5.31"}
+        io.github.hive-agi/hive-dsl {:mvn/version "0.5.34"}
 
         ;; hive.dirge.host: the :json dialect, registry and SSE executor.
-        io.github.hive-agi/hive-vessel {:mvn/version "0.1.14"}
+        io.github.hive-agi/hive-vessel {:mvn/version "0.1.16"}
 
         ;; hive.olympus.dirge: the manifest's init-ns is hive-olympus.harness.
-        io.github.hive-agi/hive-olympus {:mvn/version "0.1.11"}
+        io.github.hive-agi/hive-olympus {:mvn/version "0.1.12"}
 
         ;; hive-dirge.ling.process: ACP JSON-RPC frames on stdio.
         org.clojure/data.json {:mvn/version "2.5.2"}}
@@ -31,7 +31,7 @@
          :main-opts ["-m" "cognitect.test-runner"]
          :exec-fn cognitect.test-runner.api/test
          :jvm-opts ["-Xmx1g"]}
-  :build {:deps {io.github.hive-agi/hive-build {:mvn/version "0.1.25"}}
+  :build {:deps {io.github.hive-agi/hive-build {:mvn/version "0.1.28"}}
           :jvm-opts ["-Xmx1g"]
           :ns-default hive-build.api}
   :doctor {:main-opts ["-m" "hive-dirge.doctor"]}}}
