@@ -333,6 +333,22 @@
         (is (eventually #(= 7 (count ((:dirge/replies (addon/hooks a)))))))
         (is (= 3 (count (filter :reply/error ((:dirge/replies (addon/hooks a)))))))))))
 
+(deftest invoke-replies-route-to-registered-panel-verbs
+  (let [path (temp-discovery)
+        seen (atom [])]
+    (with-host [a {:dirge/discovery-path path :dirge/olympus (recording)}]
+      (let [doc (discovery path)
+            hooks (addon/hooks a)]
+        ((:vessel/register-panel-verbs! hooks)
+         "carto-flow" {"next" (fn [invoke] (swap! seen conj ["next" (get invoke "row")]))})
+        (is (= 202 (post-reply doc "{\"action\":\"invoke\",\"panel\":\"carto-flow\",\"verb\":\"next\",\"row\":\"r1\"}")))
+        (is (eventually #(= [["next" "r1"]] @seen)) "the host-owned panel verb runs")
+        (is (= 202 (post-reply doc "{\"action\":\"invoke\",\"panel\":\"carto-flow\",\"verb\":\"nope\"}")))
+        ((:vessel/unregister-panel-verbs! hooks) "carto-flow")
+        (is (= 202 (post-reply doc "{\"action\":\"invoke\",\"panel\":\"carto-flow\",\"verb\":\"next\"}")))
+        (is (eventually #(= 3 (count ((:dirge/replies (addon/hooks a)))))))
+        (is (= [["next" "r1"]] @seen) "an unknown or withdrawn verb is ignored, never an error")))))
+
 (deftest reply-refusals-are-synchronous
   (let [path (temp-discovery)
         o (recording)]
