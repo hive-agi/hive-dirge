@@ -175,6 +175,25 @@
       (fake/deliver! agent {:transport/closed {:eof true}})
       (is (= :ling/transport-closed (:error (deref waiting 3000 nil)))))))
 
+(deftest transport-close-keeps-the-turn-until-it-ends
+  (let [agent (fake/scripted-agent (merge (open-handlers "s1") {"session/prompt" (fn [_ _])}))
+        s (session agent)]
+    (p/open! s)
+    (p/prompt! s "go")
+    (swap! (:state s) #'acp/fail-pending)
+    (is (some? (:turn @(:state s))))
+    (is (= :ling/timeout (:error (p/collect! s 20))) "collect! waits instead of answering :ling/no-turn")))
+
+(deftest failed-prompt-send-ends-the-turn
+  (let [agent (fake/scripted-agent (open-handlers "s1"))
+        s (session agent)]
+    (p/open! s)
+    (swap! (:state agent) assoc :alive? false)
+    (is (r/ok? (p/prompt! s "go")))
+    (is (= :ling/not-started (:error (p/collect! s 1000))))
+    (is (nil? (:turn @(:state s))))
+    (is (not= :ling/busy (:error (p/prompt! s "again"))))))
+
 (deftest wire-errors-and-throwing-listener
   (let [agent (fake/scripted-agent (open-handlers "s1"))
         s (session agent {:on-event (fn [_] (throw (ex-info "listener broke" {})))})]

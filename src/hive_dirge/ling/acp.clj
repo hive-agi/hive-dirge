@@ -34,8 +34,10 @@
 (defn- register-request [state id entry]
   (-> state (assoc-in [:pending id] entry) (update :next-id inc)))
 
-(defn- fail-pending [state]
-  (assoc state :pending {} :turn nil :transport-closed? true :open? false))
+(defn- fail-pending
+  "Keeps :turn; the failed prompt's turn-ended! clears it."
+  [state]
+  (assoc state :pending {} :transport-closed? true :open? false))
 
 ;; =============================================================================
 ;; Effects
@@ -71,8 +73,10 @@
                                                                     :on-result on-result})))))
          sent (send! session (build id))]
      (when (r/err? sent)
-       (swap! state update :pending dissoc id)
-       (deliver prom sent))
+       (let [[old _] (swap-vals! state update :pending dissoc id)]
+         (when (get-in old [:pending id])
+           (when on-result (guarded! state on-result sent))
+           (deliver prom sent))))
      [id prom])))
 
 (defn- await! [prom timeout-ms what]
@@ -137,7 +141,9 @@
                 (d/prompt-result->event sid (:ok outcome))
                 {:event :ling/turn-end :session sid :stop-reason :error :error outcome})]
     (emit! session event)
-    (swap! state assoc :turn nil)
+    (swap! state (fn [s] (if (identical? turn-promise (get-in s [:turn :promise]))
+                           (assoc s :turn nil)
+                           s)))
     (deliver turn-promise (if (r/ok? outcome) (r/ok event) outcome))))
 
 (defn- open-session! [{:keys [state transport cwd mcp-servers timeout-ms] :as session}]
