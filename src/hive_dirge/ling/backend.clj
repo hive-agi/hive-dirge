@@ -61,7 +61,7 @@
   "Status of ling ID from its session SUMMARY and TRANSCRIPT."
   [id summary transcript]
   (let [cost (d/cost-usd summary)
-        progress (d/progress-fraction summary)]
+        {:keys [total] :as progress} (:progress summary)]
     (cond-> {:slave/id id
              :slave/status (slave-status (closed? transcript) summary)
              :ling/spawn-mode backend-id
@@ -69,7 +69,7 @@
              :dirge/stop-reason (:stop-reason summary)
              :dirge/usage (:usage summary)}
       cost (assoc :ling/cost-usd cost)
-      progress (assoc :ling/progress progress))))
+      (pos? (or total 0)) (assoc :ling/progress (select-keys progress [:done :total])))))
 
 ;; =============================================================================
 ;; Effects
