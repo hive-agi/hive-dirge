@@ -202,6 +202,14 @@
                    :policy (sense/->policy (:dirge/sense-policy config))
                    :receptor (:dirge/sense-receptor config)})))
 
+(defn- panel-verb-fn
+  "The invoke router's VERB-FN over the panel verbs other addons registered
+   through :vessel/register-panel-verbs!: (fn [panel verb] -> (fn [invoke]) | nil),
+   read at every reply so a registration made after start is seen."
+  [state]
+  (fn [panel verb]
+    (get-in @state [:panel-verbs panel verb])))
+
 (defn- start! [state seed runtime-config]
   (locking state
     (if (= :active (:lifecycle @state))
@@ -214,7 +222,8 @@
                        (boundary/dependency-registry config))
             router (boundary/registry-invoke-router
                     {:registry-fn (fn [] (boundary/dependency-registry config))
-                     :config config})
+                     :config config
+                     :verb-fn (panel-verb-fn state)})
             queue (action-queue config (run-command-fn state (olympus-port config) router))
             bridge (boundary/start-bridge! {:port (:dirge/port config)
                                             :token token
@@ -291,6 +300,10 @@
         {:vessel/target (fn [] (assoc target :vessel/features (boundary/client-features bridge)))
          :vessel/dispatch! (fn [op-or-ops] (v/dispatch! registry target op-or-ops))
          :vessel/register-translators! (fn [translators] (swap! registry v/register-all translators) nil)
+         :vessel/register-panel-verbs! (fn [panel verbs]
+                                         (swap! state assoc-in [:panel-verbs panel] verbs)
+                                         nil)
+         :vessel/unregister-panel-verbs! (fn [panel] (swap! state update :panel-verbs dissoc panel) nil)
          :dirge/bridge (fn [] (boundary/bridge-status bridge))
          :dirge/replies (fn [] (:replies @state))
          :dirge/senses (fn [] (some-> (:relay @state) relay/status))}

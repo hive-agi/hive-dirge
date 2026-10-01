@@ -21,6 +21,15 @@ after it. The discovery doc publishes capabilities v1 with replies, derived
 invokes and key hints; each panel's keys remain authoritative when chords
 collide across lenses. The five Olympus reply actions are unchanged.
 
+An addon that presents into dirge through `hive.dirge.host` (rather than as a
+lens of `hive.dirge`) owns its panel from the outside: the host's hooks
+`:vessel/register-panel-verbs!` (fn of `panel verbs`, where VERBS maps a verb
+string to `(fn [invoke])`) and `:vessel/unregister-panel-verbs!` (fn of
+`panel`) register the verbs an invoke reply on that panel runs. A lens-owned
+panel still routes to its owner first; an unregistered verb is ignored with a
+warning. Registrations live as long as the host instance, so a presenter
+re-offers them after a host restart.
+
 ## Feature handshake (Lens C3)
 
 dirge subscribes with `GET /vessel/events?token=..&vessel=dirge&features=spans,keys,cursor,open-file`.
