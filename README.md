@@ -156,6 +156,49 @@ manifest is used for both.
 To install this repo's addon into a dirge workspace, put (or symlink) `src/` and
 `resources/` under `.dirge/addons/hive-dirge/`.
 
+## The hive swarm in dirge (`/swarm`)
+
+dirge's `/swarm` grid shows hive's lings when hive-mcp runs `hive.dirge.host`
+and dirge subscribes to it. Both sides need one setup step. If either is
+missing, `/swarm` stays empty while hive.olympus still lists the lings.
+
+1. **hive-mcp: put hive-dirge on its classpath.** `hive.dirge.host` and the
+   `hive.olympus.dirge` harness are JVM addons that hive-mcp mounts from its
+   classpath. Add this repo to hive-mcp's `local.deps.edn`:
+
+   ```clojure
+   {:deps {io.github.hive-agi/hive-dirge {:local/root "../hive-dirge"}}}
+   ```
+
+   Or mount it into a running hive-mcp without a restart, with hive's `hot`
+   tool: `inject path=/path/to/hive-dirge resolve_deps=false`. Pass
+   `resolve_deps=false` when hive-vessel, hive-olympus and hive-addon are
+   already local roots of hive-mcp, because this repo's `deps.edn` pins their
+   released versions. Once mounted, the host writes its discovery file
+   `$XDG_RUNTIME_DIR/hive-vessel/dirge.json`.
+
+2. **dirge: subscribe to the feed.** Add this to `~/.config/dirge/config.json`:
+
+   ```json
+   { "panel_feed": { "discovery_dir": "hive-vessel" } }
+   ```
+
+   dirge reads `panel_feed` only at startup, so restart it after the change.
+   A later change of port or token in the discovery file is picked up live.
+   See dirge's `docs/panel-feed.md`.
+
+To find the missing step, check in this order:
+
+- `ls $XDG_RUNTIME_DIR/hive-vessel/`: no `dirge.json` means step 1;
+- hive-mcp's classpath (`/proc/<pid>/cmdline`) does not name hive-dirge: step 1;
+- dirge's config has no `panel_feed`: step 2.
+
+One log line is expected and does not mean a failure. When this whole checkout
+is symlinked into `~/.config/dirge/addons/`, dirge's own addon host logs at
+DEBUG `skipped: no .cljc/.cljrs source for the init namespace` for
+`hive-dirge.host` and `hive-olympus.harness`. Those manifests are JVM-only
+addons for hive-mcp, not for dirge's cljrs interpreter.
+
 ## hive.dirge session hooks
 
 `hive.dirge` (manifest `hive-dirge.edn`) registers two dirge hooks, available
