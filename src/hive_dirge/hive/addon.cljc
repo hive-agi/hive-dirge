@@ -10,7 +10,9 @@
    dirge.harness, which makes every effect a no-op outside dirge."
   (:require [hive-addon.protocol :as p]
             [hive-dirge.harness :as h]
-            [hive-dirge.hive.domain :as d]))
+            [hive-dirge.hive.domain :as d]
+            [hive-dirge.lens.registry :as lens]
+            [hive-dirge.live :as live]))
 
 (def addon-id-str "hive.dirge")
 
@@ -20,7 +22,8 @@
    :json-parse h/json-parse
    :panel!     h/panel!
    :cwd        h/cwd
-   :log!       h/log!})
+   :log!       h/log!
+   :feed!      h/panel!})
 
 (defn- call!
   [ports [server tool args]]
@@ -38,18 +41,6 @@
   [answer]
   (d/answer-body (d/result-text answer)))
 
-(defn- kanban!
-  [ports config ctx status]
-  (let [dir    (directory ports ctx)
-        answer (call! ports (d/kanban-request config dir status))]
-    (if-let [err (d/result-error answer)]
-      {:text (str "/hive kanban failed: " err)}
-      (let [text    (body answer)
-            rows    (d/kanban-rows ((:json-parse ports) text))
-            project (d/project-hint dir)]
-        ((:panel! ports) (d/kanban-panel rows text project status))
-        {:text (d/kanban-summary rows project)}))))
-
 (defn- memory!
   [ports config ctx query]
   (let [answer (call! ports (d/memory-search-request config (directory ports ctx) {:query query}))]
@@ -57,17 +48,41 @@
       {:text (str "/hive memory failed: " err)}
       {:text (d/memory-text query ((:json-parse ports) (body answer)))})))
 
-(defn- swarm!
-  [ports config ctx scope]
-  (let [dir    (directory ports ctx)
-        scope  (or scope (:hive/swarm-scope config))
-        answer (call! ports (d/swarm-request config dir scope))]
-    (if-let [err (d/result-error answer)]
-      {:text (str "/hive swarm failed: " err)}
-      (let [text (body answer)
-            rows (d/swarm-rows ((:json-parse ports) text))]
-        ((:panel! ports) (d/swarm-panel rows text scope))
-        {:text (d/swarm-summary rows)}))))
+(defn- lens!
+  "The /hive lens command: no name lists the registry, an unknown one lists
+   it too (with the bad name called out), a known one opens it, delivering
+   every fx through the panel port."
+  [registry ports config ctx]
+  (let [{:keys [lens args]} (d/parse-command ctx)
+        status (when (= lens "kanban") (first args))
+        scope (when (= lens "swarm") (first args))
+        open  (lens/parse-open registry lens)
+        ctx   (cond-> ctx
+                status (assoc :lens/status status)
+                scope (assoc :lens/scope (d/resolve-swarm-scope scope)))
+        emit! (fn [fx] (run! #((:panel! ports) %) fx))]
+    (if (and (= lens "kanban") status (not (contains? d/kanban-statuses status)))
+      {:text (str "unknown kanban status: " status)}
+      (case (:command open)
+      :lens/list     {:text (lens/list-usage registry)}
+      :lens/unknown  {:text (str "unknown lens: " (:input open) "\n"
+                                 (lens/list-usage registry))}
+      :lens/open     (let [out (lens/open! ports config ctx (:lens open))]
+                       (emit! (:fx out))
+                       {:text (:text out)})))))
+
+(defn- invoke!
+  "The /hive invoke <panel> <verb> <row?> command: routes the invoke to the
+   owning lens's verb through the registry, warns and ignores an unknown
+   panel or verb."
+  [registry ports panel verb row]
+  (let [routed (lens/route-invoke registry {:panel panel :verb verb :row row :payload {}})]
+    (if (:invoke/routed routed)
+      (do ((:effects routed) ports) {:text (str panel ": " verb)})
+      (do (when-let [log! (:log! ports)]
+            (log! :warn (str "hive invoke ignored: " (:verb routed)
+                             " on " (:panel routed))))
+          {:text (str "ignored: " (:verb routed) " on " (:panel routed))}))))
 
 (defn- shout!
   [ports config ctx message]
@@ -77,21 +92,24 @@
       {:text "shouted to the hivemind"})))
 
 (defn run-command
-  "Handles one /hive invocation against `ports`. Answers a dirge command
-   reply {:text ..} or {:text .. :prompt ..}."
-  [ports config ctx]
-  (let [{:keys [action status scope reason query message]} (d/parse-command ctx)]
-    (case action
-      :help    {:text d/usage}
-      :unknown {:text (str reason "\n" d/usage)}
-      :catchup (d/command-reply config :catchup
-                                (call! ports (d/catchup-request config (directory ports ctx))))
-      :wrap    (d/command-reply config :wrap
-                                (call! ports (d/wrap-request config (directory ports ctx))))
-      :kanban  (kanban! ports config ctx status)
-      :memory  (memory! ports config ctx query)
-      :swarm   (swarm! ports config ctx scope)
-      :shout   (shout! ports config ctx message))))
+  "Handles one /hive invocation against `ports` and the lens REGISTRY
+   (default: the built-in lenses). Answers a dirge command reply {:text ..}
+   or {:text .. :prompt ..}."
+  ([ports config ctx] (run-command (lens/builtin-registry) ports config ctx))
+  ([registry ports config ctx]
+   (let [{:keys [action reason query message panel verb row]}
+         (d/parse-command ctx)]
+     (case action
+       :help    {:text d/usage}
+       :unknown {:text (str reason "\n" d/usage)}
+       :catchup (d/command-reply config :catchup
+                                 (call! ports (d/catchup-request config (directory ports ctx))))
+       :wrap    (d/command-reply config :wrap
+                                 (call! ports (d/wrap-request config (directory ports ctx))))
+       :lens    (lens! registry ports config ctx)
+       :invoke  (invoke! registry ports panel verb row)
+       :memory  (memory! ports config ctx query)
+       :shout   (shout! ports config ctx message)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Session hooks
@@ -164,19 +182,53 @@
   [state]
   (or (:config @state) (d/resolve-config nil)))
 
-(defrecord HiveDirgeAddon [state ports]
+(defn tool-list
+  "The addon's tools, built per call so a refresh sees REPL redefinitions."
+  [{:keys [state ports]}]
+  (live/tools-with addon-id-str (tool-defs (live/ports ports) #(current-config state))))
+
+(defn- invoke-hook
+  "The in-dirge half of invoke routing: runs the owning lens's verb, warns
+   and answers false for an unknown panel or verb."
+  [registry ports {:keys [panel verb row payload] :or {payload {}}}]
+  (let [routed (lens/route-invoke registry {:panel panel :verb verb :row row :payload payload})]
+    (if (:invoke/routed routed)
+      (do ((:effects routed) ports) true)
+      (do (when-let [log! (:log! ports)]
+            (log! :warn (str "hive invoke ignored: " verb " on " panel)))
+          false))))
+
+(defn hook-map
+  "The addon's hooks, built per call so a refresh sees REPL redefinitions."
+  [{:keys [state ports registry]}]
+  (let [ports (live/ports ports)
+        cfg   #(current-config state)]
+    (live/hooks-with
+     addon-id-str
+     {:dirge/system-prompt    (fn [_] (d/system-prompt (cfg)))
+      :dirge/session-start    (fn [ctx] (session-start ports (cfg) ctx))
+      :dirge/session-end      (fn [ctx] (session-end ports (cfg) ctx))
+      :dirge/commands         {"hive" {:description "hive: catchup | wrap | kanban [status] | swarm [scope] | lens [name] | memory <query> | shout <message>"
+                                       :handler     (fn [ctx] (run-command registry ports (cfg) ctx))}}
+      :dirge/lenses           (fn [] (vec (lens/list-lenses registry)))
+      :dirge/register-lenses! (fn [lenses]
+                                (swap! (:lens-registry @state) #(lens/with-builtins % lenses))
+                                nil)
+      :dirge/invoke           (fn [ctx] (invoke-hook registry ports ctx))
+      :dirge/command-hooks    {"guard" (fn [ctx] (guard-hook ports (cfg) ctx))}})))
+
+(defrecord HiveDirgeAddon [state ports registry]
   p/IAddon
   (addon-id [_] addon-id-str)
   (addon-type [_] :native)
-  (capabilities [_] #{:tools :health-reporting :dirge/hooks :dirge/commands :dirge/command-hooks :dirge/panels})
+  (capabilities [_] #{:tools :health-reporting :dirge/hooks :dirge/commands :dirge/command-hooks :dirge/panels :dirge/lenses})
   (initialize! [_ config]
-    (reset! state {:config (d/resolve-config config) :initialized? true})
+    (swap! state assoc :config (d/resolve-config config) :initialized? true)
     {:success? true :errors [] :metadata {:addon/id addon-id-str}})
   (shutdown! [_]
     (swap! state assoc :initialized? false)
     {:success? true :errors []})
-  (tools [_]
-    (tool-defs ports #(current-config state)))
+  (tools [this] (tool-list this))
   (schema-extensions [_] {})
   (health [_]
     (let [s @state]
@@ -184,22 +236,21 @@
         {:status :ok :details {:server (get-in s [:config :hive/server])}}
         {:status :down :details {:reason :not-initialized}})))
   (excluded-tools [_] #{})
-  (hooks [_]
-    {:dirge/system-prompt (fn [_] (d/system-prompt (current-config state)))
-     :dirge/session-start (fn [ctx] (session-start ports (current-config state) ctx))
-     :dirge/session-end   (fn [ctx] (session-end ports (current-config state) ctx))
-     :dirge/commands      {"hive" {:description "hive: catchup | wrap | kanban [status] | memory <query> | swarm [scope] | shout <message>"
-                                   :handler     (fn [ctx]
-                                                  (run-command ports (current-config state) ctx))}}
-     :dirge/command-hooks {"guard" (fn [ctx] (guard-hook ports (current-config state) ctx))}}))
+  (hooks [this] (hook-map this)))
 
 (defn make-addon
-  "An uninitialized addon over `ports`."
-  [ports]
-  (->HiveDirgeAddon (atom {:config nil :initialized? false}) ports))
+  "An uninitialized addon over `ports`. REGISTRY defaults to the built-in
+   lenses; hosts compose extra lenses with
+   hive-dirge.lens.registry/with-builtins."
+  ([ports] (make-addon ports (lens/builtin-registry)))
+  ([ports registry]
+   (let [live (atom registry)]
+     (->HiveDirgeAddon (atom {:config nil :initialized? false :lens-registry live})
+                       ports (fn [] (@live))))))
 
 (defn addon-ctor
-  "Manifest :addon/init-fn: config -> uninitialized IAddon bound to
-   dirge.harness. Config is applied by initialize!."
+  "Manifest :addon/init-fn: config -> uninitialized IAddon whose ports are
+   read from `harness-ports` per call, registered in hive-dirge.live for the
+   REPL. Config is applied by initialize!."
   [_config]
-  (make-addon harness-ports))
+  (live/register! addon-id-str (make-addon (fn [] harness-ports))))

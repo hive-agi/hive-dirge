@@ -13,7 +13,8 @@
             [hive-dirge.economy.domain :as d]
             [hive-dirge.economy.pipeline.observe :as observe]
             [hive-dirge.economy.pipeline.retrieve :as retrieve]
-            [hive-dirge.economy.ports :as ports]))
+            [hive-dirge.economy.ports :as ports]
+            [hive-dirge.live :as live]))
 
 ;; ---------------------------------------------------------------------------
 ;; domain
@@ -176,13 +177,16 @@
 (deftest addon-end-to-end
   (let [a     (addon/make-addon {:cwd (constantly nil)})
         hooks (p/hooks a)
-        tool  (:handler (first (p/tools a)))]
+        tool  (:handler (first (p/tools a)))
+        event (:dirge/event hooks)]
     (is (p/addon? a))
     (is (= :down (:status (p/health a))))
     (is (:success? (p/initialize! a {:addon/id "hive.dirge.economy"})))
     (is (contains? (p/capabilities a) :context/economy))
+    (is (not (contains? hooks :dirge/after-tool-call)))
     (is (nil? ((:dirge/session-start hooks) {:session-id "s1" :cwd nil})))
-    (is (nil? ((:dirge/after-tool-call hooks) {:tool "grep" :args {:p "x"} :result "hit-1\nhit-2"})))
+    (is (nil? (event {:event :tool-call :id "c1" :tool "grep" :args {:p "x"}})))
+    (is (nil? (event {:event :tool-result :id "c1" :output "hit-1\nhit-2"})))
     (let [h (d/mint-handle {} (d/content-key (d/observation {:tool "grep" :args {:p "x"} :result "hit-1\nhit-2"})))]
       (is (= {:content [{:type "text" :text "hit-2"}] :isError false}
              (tool {:handle (d/cite h) :start 2})))
@@ -193,7 +197,12 @@
       (is (= 1 (:hits details))))))
 
 (deftest addon-outside-dirge-is-safe
-  (let [a (addon/addon-ctor {})]
-    (p/initialize! a {})
-    (is (nil? ((:dirge/after-tool-call (p/hooks a)) {:tool "t" :result "r"})))
-    (is (= :ok (:status (p/health a))))))
+  (let [before @live/!addons
+        a      (addon/addon-ctor {})]
+    (try
+      (p/initialize! a {})
+      (is (nil? ((:dirge/event (p/hooks a)) {:event :tool-result :id "x" :output "r"})))
+      (is (= :ok (:status (p/health a))))
+      (is (identical? a (live/addon addon/addon-id-str)))
+      (finally
+        (reset! live/!addons before)))))

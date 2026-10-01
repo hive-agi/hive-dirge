@@ -33,6 +33,21 @@
   [tool args]
   (str tool " " (canonical (or args {}))))
 
+(def args-max-chars 200)
+
+(defn args-text
+  "Tool args as one line of at most args-max-chars: a string as sent (the
+   span's JSON summary), anything else printed canonically; nil when empty."
+  [args]
+  (let [s (cond
+            (nil? args)                      nil
+            (string? args)                   args
+            (and (coll? args) (empty? args)) nil
+            :else                            (canonical args))
+        s (some-> s (str/replace #"\s+" " ") str/trim)]
+    (when-not (or (str/blank? s) (contains? #{"{}" "null"} s))
+      (if (> (count s) args-max-chars) (str (subs s 0 args-max-chars) "…") s))))
+
 (defn body-text
   "A tool result as text; non-string results are printed canonically."
   [result]
@@ -50,14 +65,23 @@
 ;; Observation
 
 (defn observation
-  "Promotes one after-tool-call context to an Observation."
-  [{:keys [tool args result error?]}]
+  "Promotes one after-tool-call context to an Observation. :tool-use-id is
+   kept only when the host sent one."
+  [{:keys [tool args result error? tool-use-id]}]
   (let [body (body-text result)]
-    {:tool      (str tool)
-     :signature (signature tool args)
-     :body      body
-     :tokens    (estimate-tokens body)
-     :error?    (boolean error?)}))
+    (cond-> {:tool      (str tool)
+             :signature (signature tool args)
+             :body      body
+             :tokens    (estimate-tokens body)
+             :error?    (boolean error?)}
+      (some? tool-use-id) (assoc :tool-use-id (str tool-use-id)))))
+
+(defn signature-args
+  "args-text of an Observation, read back from its :signature."
+  [{:keys [tool signature]}]
+  (when (and (string? signature) (string? tool)
+             (str/starts-with? signature (str tool " ")))
+    (args-text (subs signature (inc (count tool))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Handle

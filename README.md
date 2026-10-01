@@ -50,6 +50,65 @@ Install: symlink this checkout into dirge's addon directory, then run
 ln -s "$PWD" ~/.config/dirge/addons/hive-dirge
 ```
 
+## hive.dirge.host: hive senses in dirge's agent loop
+
+MCP piggyback blocks reach the dirge model only inside the result of the
+next hive tool call, as text the model may or may not act on. The sense
+relay is the push path: it changes the control flow of the running loop.
+
+hive-agent's sixth-sense turns hivemind shouts into *senses*: a ling asks,
+is blocked, failed, completed, or ran out of context. The host listens on
+sixth-sense (`hive-agent.sixth-sense.api/listen!`), drains a consume-once
+batch for consumer `dirge`, and sends each sense as one loop op on the SSE
+feed dirge already subscribes to:
+
+| op | what dirge does | default for |
+|---|---|---|
+| `loop/steer` | injects it before the next model call of the running turn, or starts a turn when idle | ask, blocked, error |
+| `loop/interject` | ends the running turn at its next boundary; the message opens the next one | context-death |
+| `loop/followup` | delivers it when the current run finishes, or starts a run when idle | completed |
+
+Each op carries `prompt`, the text the model reads, including how to
+answer (`swarm` `ss reply` to the ask id or agent id). dirge acknowledges
+every op it injected with the reply `{"action":"ack","target":<sense id>}`.
+Unacknowledged ops are sent again when a client reconnects. Nothing is
+drained while no connected client subscribed with the `loop` feature, so
+the senses stay in sixth-sense (persisted) until one does.
+
+Config on `hive.dirge.host`: `:dirge/senses?` (default true),
+`:dirge/sense-policy` (for example `{"completed" "steer", "error" "ignore"}`)
+and `:dirge/sense-receptor` (a sixth-sense receptor, for example
+`{:parent "coordinator"}`).
+
+## Checking the /swarm setup: `clojure -M:doctor`
+
+`/swarm` in dirge stays empty until both of these are done:
+
+1. hive-mcp mounted `hive.dirge.host` (hive-dirge is on its classpath), which
+   writes `$XDG_RUNTIME_DIR/hive-vessel/dirge.json`;
+2. dirge's `config.json` has `"panel_feed": {"discovery_dir": "hive-vessel"}`.
+
+The doctor checks both and prints a fix for each step that fails:
+
+```sh
+clojure -M:doctor
+clojure -M:doctor --discovery PATH --dirge-config PATH
+```
+
+```
+hive-dirge doctor: /swarm setup
+  [ok] step 1: hive.dirge.host is mounted: $XDG_RUNTIME_DIR/hive-vessel/dirge.json -> http://127.0.0.1:4100/vessel
+  [FAIL] step 2: ~/.config/dirge/config.json has no panel_feed
+         fix: add { "panel_feed": { "discovery_dir": "hive-vessel" } } to dirge's config.json, then restart dirge
+setup incomplete
+```
+
+Step 1 passes only when the discovery file is for vessel `dirge`, its pid is
+running and its port accepts connections. A leftover file from a hive-mcp
+that has exited fails as stale. When the file is missing, the doctor looks for
+running hive-mcp JVMs and reports whether any of them has hive-dirge on its
+classpath. It exits 0 when both steps pass and 1 otherwise.
+
 ## Layout
 
 ```
@@ -58,16 +117,20 @@ deps.edn                               clojure + hive-addon + hive-dsl; :dev, :t
 version.edn, VERSION                   hive-build release config (:publish :clojars)
 src/hive_dirge/hive/addon.cljc         hive.dirge IAddon (record HiveDirgeAddon): /hive, tools, effects via a ports map
 src/hive_dirge/hive/domain.cljc        pure: config, /hive parsing, MCP requests, answers -> text and panels
-src/hive_dirge/harness.cljc            dirge.harness from portable code (notify, mcp-call, panel!, ...)
+src/hive_dirge/harness.cljc            dirge.harness from portable code (notify, mcp-call, panel!, refresh!, ...)
+src/hive_dirge/live.cljc               live addon instances + tools/hooks added from the REPL (defonce atoms)
+src/hive_dirge/dev.cljc                REPL helpers: inspect, add-tool!/add-hook!, refresh!
 src/hive_dirge/probe/addon.cljc        probe IAddon (record DirgeProbeAddon, ctor addon-ctor)
 src/hive_dirge/economy/addon.cljc      hive.dirge.economy IAddon: hooks + context_retrieve, wiring only
 src/hive_dirge/economy/ports.cljc      IObservationLog, IObservationIndex, IDigestor
 src/hive_dirge/economy/{domain,digest,markdown}.cljc
                                        pure: Observation/Handle, Digest build + budget fit, markdown render/parse
-src/hive_dirge/economy/pipeline/       observe (after-tool-call), retrieve (tool), compact (compact hooks)
+src/hive_dirge/economy/pipeline/       watch (:dirge/event), observe, retrieve (tool), compact (compact hooks)
 src/hive_dirge/economy/adapters/       local observation log, structured digestor
 src/hive_dirge/economy/registry.cljc   strategy registry selected by :addon/config
 src/hive_dirge/host.clj                hive.dirge.host IAddon (JVM); host/{domain,ports,boundary}.clj strata
+src/hive_dirge/doctor.clj              clojure -M:doctor: gathers facts through a ports map
+src/hive_dirge/doctor/domain.clj       pure: the two /swarm setup checks, report, render
 test/hive_dirge/host_test.clj          discovery 0600, token/Origin, reply routing, SSE frames, mount e2e
 resources/META-INF/hive-addons/
   hive-dirge.edn                       :addon/id "hive.dirge"
@@ -93,6 +156,49 @@ manifest is used for both.
 To install this repo's addon into a dirge workspace, put (or symlink) `src/` and
 `resources/` under `.dirge/addons/hive-dirge/`.
 
+## The hive swarm in dirge (`/swarm`)
+
+dirge's `/swarm` grid shows hive's lings when hive-mcp runs `hive.dirge.host`
+and dirge subscribes to it. Both sides need one setup step. If either is
+missing, `/swarm` stays empty while hive.olympus still lists the lings.
+
+1. **hive-mcp: put hive-dirge on its classpath.** `hive.dirge.host` and the
+   `hive.olympus.dirge` harness are JVM addons that hive-mcp mounts from its
+   classpath. Add this repo to hive-mcp's `local.deps.edn`:
+
+   ```clojure
+   {:deps {io.github.hive-agi/hive-dirge {:local/root "../hive-dirge"}}}
+   ```
+
+   Or mount it into a running hive-mcp without a restart, with hive's `hot`
+   tool: `inject path=/path/to/hive-dirge resolve_deps=false`. Pass
+   `resolve_deps=false` when hive-vessel, hive-olympus and hive-addon are
+   already local roots of hive-mcp, because this repo's `deps.edn` pins their
+   released versions. Once mounted, the host writes its discovery file
+   `$XDG_RUNTIME_DIR/hive-vessel/dirge.json`.
+
+2. **dirge: subscribe to the feed.** Add this to `~/.config/dirge/config.json`:
+
+   ```json
+   { "panel_feed": { "discovery_dir": "hive-vessel" } }
+   ```
+
+   dirge reads `panel_feed` only at startup, so restart it after the change.
+   A later change of port or token in the discovery file is picked up live.
+   See dirge's `docs/panel-feed.md`.
+
+To find the missing step, check in this order:
+
+- `ls $XDG_RUNTIME_DIR/hive-vessel/`: no `dirge.json` means step 1;
+- hive-mcp's classpath (`/proc/<pid>/cmdline`) does not name hive-dirge: step 1;
+- dirge's config has no `panel_feed`: step 2.
+
+One log line is expected and does not mean a failure. When this whole checkout
+is symlinked into `~/.config/dirge/addons/`, dirge's own addon host logs at
+DEBUG `skipped: no .cljc/.cljrs source for the init namespace` for
+`hive-dirge.host` and `hive-olympus.harness`. Those manifests are JVM-only
+addons for hive-mcp, not for dirge's cljrs interpreter.
+
 ## hive.dirge session hooks
 
 `hive.dirge` (manifest `hive-dirge.edn`) registers two dirge hooks, available
@@ -113,10 +219,12 @@ from the dirge release "dirge addon session hooks" (older dirge ignores them;
 `hive.dirge.economy` (manifest `hive-dirge-economy.edn`) keeps a session's
 context bounded without losing what was folded away:
 
-- `:dirge/after-tool-call` logs every tool result under a short content handle
-  (`§1a2b3c4d`), in memory and in `.dirge/economy/<session>.edn`. The
+- `:dirge/event` only watches. A `:tool-call` and its `:tool-result` (paired
+  by `:id`) are logged as one result under a short content handle
+  (`§1a2b3c4d`), in memory and in `.dirge/economy/<session>.edn`. Turn, usage,
+  run and compaction events are counted into the addon's health details. The
   `context_retrieve` tool reads a handle back, either whole or as a line or
-  char range. The hook answers nil, so dirge appends nothing.
+  char range. The hook answers nil.
 - `:dirge/compact` receives `{:span [{:role :text :tool :tool-use-id} ...]
   :tokens :reason :focus :ctx-max :pressure :session-id}` and answers
   `{:summary markdown}`, or nil so that dirge's built-in summarizer runs. The
@@ -142,6 +250,21 @@ context bounded without losing what was folded away:
 The digestor is picked from a strategy registry by `:economy/digestor` in
 `:addon/config` (default `:structured`, which makes no model call). Adding a
 strategy means adding an entry to that map.
+
+## Developing from the REPL
+
+Both addons build their `tools` and `hooks` on every call, from vars and from
+`hive-dirge.live`, and read their harness ports at call time. Re-evaluating a
+defn and then asking dirge to refresh is enough; no re-initialize is needed.
+
+```clojure
+(require '[hive-dirge.dev :as dev])
+(dev/inspect)                                   ; every live addon: tools, hooks, health, extras
+(dev/add-hook! "hive.dirge" :dirge/on-prompt (fn [_] "hi"))
+(dev/add-tool! "hive.dirge.economy" {:name "probe" :description "p" :inputSchema {} :handler (fn [_] "ok")})
+(dev/reset-extras!)
+(dev/refresh!)                                  ; true inside dirge, false elsewhere
+```
 
 ## Portability rules for addon code
 

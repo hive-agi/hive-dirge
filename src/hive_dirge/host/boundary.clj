@@ -8,6 +8,7 @@
             [hive-addon.protocol :as addon]
             [hive-dirge.host.domain :as domain]
             [hive-dirge.host.ports :as ports]
+            [hive-dirge.lens.registry :as lens]
             [hive-vessel.executor.sse :as sse])
   (:import (com.sun.net.httpserver HttpExchange HttpHandler HttpServer)
            (java.io InputStream)
@@ -113,12 +114,15 @@
   "hive-vessel's SSE bridge on loopback, on a random port unless PORT, gated
    by TOKEN, refusing every Origin. Its /reply route is replaced by ours:
    ON-REPLY receives each admitted raw POST body and returns the HTTP status
-   to answer, so it must not block on the action it accepts."
-  [{:keys [port token on-reply heartbeat-ms]}]
+   to answer, so it must not block on the action it accepts. ON-CONNECT
+   (optional) runs after each subscriber is registered, so a broadcast made
+   from it reaches that subscriber."
+  [{:keys [port token on-reply on-connect heartbeat-ms]}]
   (let [bridge (sse/start! (cond-> {:port (or port 0)
                                     :token token
                                     :allowed-origin? refuse-every-origin}
-                             heartbeat-ms (assoc :heartbeat-ms heartbeat-ms)))
+                             heartbeat-ms (assoc :heartbeat-ms heartbeat-ms)
+                             on-connect (assoc :on-connect on-connect)))
         ^HttpServer server (:server bridge)]
     (.removeContext server ^String reply-path)
     (.createContext server ^String reply-path ^HttpHandler (reply-handler token on-reply))
@@ -127,6 +131,31 @@
 (defn stop-bridge! [bridge] (when bridge (sse/stop! bridge)))
 
 (defn executor [bridge] (sse/executor bridge))
+
+(defn broadcast!
+  "Send one JSON-ready MESSAGE to every connected client, outside the vessel
+   translator registry (loop ops are already wire values)."
+  [bridge message]
+  (sse/broadcast! bridge message))
+
+(defn client-features
+  "The UNION of every connected dirge client's advertised feature set (a set
+   of keywords, e.g. #{:spans :keys :cursor :open-file}), read from the
+   bridge. nil or a blank subscription `features` param is no features, so
+   with no client this is #{}.
+
+   Every translator gates on that same union: upgraded output is sent if any
+   connected client advertises the feature. Clients lacking it ignore fields
+   they do not understand; no intersection-based downgrade is applied.
+
+   The reader resolves `hive-vessel.executor.sse/client-features` at call
+   time: it exists from hive-vessel 0.1.13 onward (the production pin is
+   0.1.14). A missing reader under an older :dev override degrades to #{}
+   -- the pre-handshake behaviour -- never a load error."
+  [bridge]
+  (if-let [reader (resolve 'hive-vessel.executor.sse/client-features)]
+    (reader bridge (name domain/vessel-id))
+    #{}))
 
 (defn bridge-status
   "What health may show about BRIDGE. Never the token."
@@ -201,3 +230,80 @@
    seen by the next reply."
   [hooks-fn]
   (->HooksOlympus hooks-fn))
+
+;; =============================================================================
+;; Invoke routing: the lens registry decides, the owning side runs the verb
+;; =============================================================================
+
+(defn dependency-lenses
+  "Collect lens contributions from mounted IAddons' :dirge/lenses hooks."
+  [config]
+  (mapcat (fn [[_ dep]]
+            (when (addon/addon? dep)
+              (try (let [value (get (addon/hooks dep) :dirge/lenses)]
+                     (cond (fn? value) (value)
+                           (sequential? value) value))
+                   (catch Throwable _ nil))))
+          (:mount/dependencies config)))
+
+(defn dependency-registry [config]
+  (lens/with-builtins (lens/builtin-registry) (dependency-lenses config)))
+
+(defn- owner-invoke-hook [config panel]
+  (some (fn [[_ dep]]
+          (when (addon/addon? dep)
+            (try (let [hooks (addon/hooks dep)
+                       offered (:dirge/lenses hooks)
+                       lenses (if (fn? offered) (offered) offered)]
+                   (when (and (some #(= panel (:lens/panel %)) lenses)
+                              (fn? (:dirge/invoke hooks)))
+                     (:dirge/invoke hooks)))
+                 (catch Throwable _ nil))))
+        (sort-by (fn [[id _]] (= id "hive.dirge")) (:mount/dependencies config))))
+
+(defn registry-invoke-router
+  "An InvokeRouter over REGISTRY-FN (0-arity, a hive-dirge.lens.registry
+   registry) and the mounted addons' :dirge/invoke hooks from CONFIG.
+
+   The lens registry owns the panel ids: when it names the owner, the invoke
+   is re-routed over the owning addon's :dirge/invoke hook (the verbs run
+   in-dirge). Otherwise the host owns the panel; VERB-FN (fn [panel verb] ->
+   (fn [invoke]) or nil) runs it when it knows the verb. An unknown panel or
+   verb is ignored with a warning, never an error. Every lookup resolves at
+   call time, so a hive.dirge that mounts later is seen by the next reply."
+  [{:keys [registry-fn config verb-fn warn!]}]
+  (let [warn! (or warn! (fn [_level msg] (binding [*out* *err*] (println msg))))]
+   (reify ports/InvokeRouter
+    (route-invoke! [_ {:keys [invoke] :as _cmd}]
+      (let [panel (get invoke "panel")
+            verb  (get invoke "verb")
+            reg   (when registry-fn (registry-fn))
+            owner (when reg (lens/owner-of reg panel))]
+        (cond
+          owner
+          (let [hook (owner-invoke-hook config panel)]
+            (if (and hook (lens/known-verb? owner verb))
+              (try
+                (boolean (hook {:panel panel :verb verb :row (get invoke "row")
+                       :payload (get invoke "payload" {})}))
+                (catch Throwable t
+                  (warn! :warn (str "hive invoke: " verb " on " panel
+                                   " failed: " (ex-message t)))
+                  false))
+              (do (warn! :warn (str "hive invoke: unsupported verb or missing :dirge/invoke hook for lens "
+                                   (:lens/id owner) "; ignored " verb " on " panel))
+                  false)))
+          (ifn? verb-fn)
+          (if-let [run (verb-fn panel verb)]
+            (try
+              (run invoke)
+              true
+              (catch Throwable t
+                (warn! :warn (str "hive invoke: " verb " on " panel
+                                 " failed: " (ex-message t)))
+                false))
+            (do (warn! :warn (str "hive invoke: unknown verb " verb " on " panel "; ignored"))
+                false))
+          :else
+          (do (warn! :warn (str "hive invoke: unknown panel " panel "; ignored " verb))
+              false)))))))

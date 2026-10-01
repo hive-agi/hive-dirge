@@ -72,12 +72,14 @@
   #{"todo" "inprogress" "inreview" "done"})
 
 (def usage
-  "Help text for the /hive command family."
+  "Help text for the /hive command family. The lens views (kanban, swarm)
+   open through the lens registry."
   (str "/hive catchup          load hive session context (memory, kanban, git) into the next turn\n"
        "/hive wrap             record a hive session wrap for this project\n"
-       "/hive kanban [status]  show the project kanban in a side panel (status: todo, inprogress, inreview, done)\n"
+       "/hive kanban [status]  open the kanban lens (status: todo, inprogress, inreview, done)\n"
+       "/hive swarm [scope]    open the swarm lens (scope: all, project, or a project id)\n"
+       "/hive lens [name]      open a lens, or list the registered lenses\n"
        "/hive memory <query>   search hive memory; hits listed in the chat\n"
-       "/hive swarm [scope]    hive agents, working ones first, in a side panel (scope: all, project, or a project id)\n"
        "/hive shout <message>  post progress to the hivemind"))
 
 (defn- words
@@ -100,22 +102,14 @@
       "help"    {:action :help}
       "catchup" {:action :catchup}
       "wrap"    {:action :wrap}
-      "kanban"  (let [status (first more)]
-                  (cond
-                    (nil? status)                   {:action :kanban}
-                    (contains? kanban-statuses status) {:action :kanban :status status}
-                    :else {:action :unknown
-                           :reason (str "unknown kanban status: " status)}))
-      "swarm"   (if-let [scope (first more)]
-                  {:action :swarm :scope (resolve-swarm-scope scope)}
-                  {:action :swarm})
+      "lens"    {:action :lens :lens (first more) :args (vec (rest more))}
       "memory"  (if (str/blank? text)
                   {:action :unknown :reason "usage: /hive memory <query>"}
                   {:action :memory :query text})
       "shout"   (if (str/blank? text)
                   {:action :unknown :reason "usage: /hive shout <message>"}
                   {:action :shout :message text})
-      {:action :unknown :reason (str "unknown /hive subcommand: " sub)})))
+      {:action :lens :lens sub :args (vec more)})))
 
 ;; ---------------------------------------------------------------------------
 ;; Requests: [server tool args] triples for dirge.harness/mcp-call
@@ -380,11 +374,13 @@
     "normal"))
 
 (defn kanban-line
-  "One panel line for a kanban row."
+  "One panel line for a kanban row: the task id is the row id dirge echoes
+   back on an invoke of the kanban lens."
   [row]
   {:text (str "[" (or (:status row) "?") "] "
               (or (:title row) "(untitled)")
               "  " (:id row))
+   :id   (:id row)
    :face (priority-face (:priority row))})
 
 (defn kanban-panel
@@ -459,10 +455,12 @@
     "normal"))
 
 (defn swarm-line
-  "One panel line for an agent row: id, status, project."
+  "One panel line for an agent row: id, status, project. The agent id is the
+   row id dirge echoes back on an invoke of the swarm lens."
   [row]
   {:text (str (or (:id row) "?") "  " (or (:status row) "?") "  "
               (or (agent-project row) "-"))
+   :id   (:id row)
    :face (status-face (:status row))})
 
 (defn swarm-title
@@ -520,7 +518,7 @@
                 " and a session wrap is recorded at exit")
               ". The user can run /hive wrap (record a session wrap), ")
          "The user can run /hive catchup (load hive memory and kanban context), /hive wrap (record a session wrap), ")
-       "/hive kanban [status] and /hive swarm [scope] (side panels), "
+       "/hive kanban [status] and /hive swarm [scope] (lenses, side panels), "
        "/hive memory <query> and /hive shout <message>, none of which spends "
        "a turn. You can call the "
        "hive_memory_search and hive_kanban_list tools to consult hive memory "

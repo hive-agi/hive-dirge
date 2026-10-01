@@ -49,22 +49,37 @@
   [stats k]
   (swap! stats update k (fnil inc 0)))
 
+(defn- quiet
+  "(f) or nil when it throws; a log without the port answers nil."
+  [f]
+  (try (f) (catch #?(:cljs :default :default Throwable) _ nil)))
+
 (defn- handle-for!
-  "The Handle already held for this result, else a fresh one; nil on failure."
-  [{:keys [log stats]} {:keys [tool text handle]}]
+  "The Handle already held for this result (exact :tool-use-id join, then
+   tool+body), else a fresh one; nil on failure."
+  [{:keys [log stats]} {:keys [tool text handle tool-use-id]}]
   (or handle
-      (try (p/handle-of log tool text)
-           (catch #?(:cljs :default :default Throwable) _ nil))
-      (try (p/put-observation! log (d/observation {:tool tool :args nil :result text}))
+      (when tool-use-id (quiet #(p/handle-by-id log tool-use-id)))
+      (quiet #(p/handle-of log tool text))
+      (try (p/put-observation! log (d/observation {:tool tool :args nil :result text
+                                                   :tool-use-id tool-use-id}))
            (catch #?(:cljs :default :default Throwable) _
              (count! stats :digest-handle-errors)
              nil))))
 
+(defn- args-for
+  [log {:keys [args]} h]
+  (or args (when h (quiet #(p/args-of log h)))))
+
 (defn resolve-handles!
-  [env entries]
+  [{:keys [log] :as env} entries]
   (mapv (fn [e]
           (if (and (= "tool" (:role e)) (not (:digest e)))
-            (if-let [h (handle-for! env e)] (assoc e :handle h) e)
+            (let [h    (handle-for! env e)
+                  args (args-for log e h)]
+              (cond-> e
+                h    (assoc :handle h)
+                args (assoc :args args)))
             e))
         entries))
 
@@ -87,12 +102,16 @@
 ;; Hooks
 
 (defn compact
-  "Hook body. `env` is {:log :stats :digestor :digests atom :config :now fn?}."
+  "Hook body. `env` is {:log :stats :digestor :digests atom :config :now fn?}.
+   A prior Digest in the span wins; the per-session one fills in only when
+   the span carries none."
   [{:keys [stats digestor config now] :as env} ctx]
   (try
     (count! stats :compactions)
     (let [{:keys [entries has-prior? tokens session-id]} (promote (collect ctx))
           last-d  (when-not has-prior? (prior-of env session-id))
+          _       (cond has-prior? (count! stats :prior-from-span)
+                        last-d     (count! stats :prior-from-session))
           entries (cond->> (resolve-handles! env entries)
                     last-d (into [{:i -1 :role "assistant" :text "" :digest last-d}]))
           anchor  (assoc (dg/anchor-of entries) :at (when now (now)))
