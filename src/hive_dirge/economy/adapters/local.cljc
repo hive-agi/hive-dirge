@@ -40,16 +40,20 @@
 
 (defn spill-line
   [handle obs]
-  (str (pr-str (assoc (select-keys obs [:tool :signature :tokens :error? :body])
+  (str (pr-str (assoc (select-keys obs [:tool :signature :tokens :error? :tool-use-id :body])
                       :handle handle))
        "\n"))
 
 (defn- store
   [s full handle obs]
   (-> s
-      (assoc-in [:by-handle handle] (assoc obs :key full))
+      (assoc-in [:by-handle handle] (assoc (dissoc obs :tool-use-id) :key full))
       (assoc-in [:by-key full] handle)
       (update-in [:by-body (d/body-key (:tool obs) (:body obs))] #(or % handle))))
+
+(defn- join-id
+  [s id handle]
+  (if (and id handle) (assoc-in s [:by-id id] handle) s))
 
 (defn- spill!
   [spill stats handle obs]
@@ -63,25 +67,36 @@
 (defrecord HiveDirgeEconomyLocalLog [state stats spill]
   p/IObservationLog
   (put-observation! [_ obs]
-    (let [full (d/content-key obs)]
-      (or (get-in @state [:by-key full])
-          (let [s (swap! state
-                         (fn [s]
-                           (if (get-in s [:by-key full])
-                             s
-                             (store s full
-                                    (d/mint-handle #(get-in s [:by-handle % :key]) full)
-                                    obs))))
-                h (get-in s [:by-key full])]
-            (spill! spill stats h obs)
-            h))))
+    (let [full (d/content-key obs)
+          id   (:tool-use-id obs)
+          held (get-in @state [:by-key full])]
+      (if held
+        (do (swap! state join-id id held) held)
+        (let [s (swap! state
+                       (fn [s]
+                         (let [s (if (get-in s [:by-key full])
+                                   s
+                                   (store s full
+                                          (d/mint-handle #(get-in s [:by-handle % :key]) full)
+                                          obs))]
+                           (join-id s id (get-in s [:by-key full])))))
+              h (get-in s [:by-key full])]
+          (spill! spill stats h obs)
+          h))))
   (fetch [_ handle rng]
     (when-let [obs (get-in @state [:by-handle handle])]
       (d/slice rng (:body obs))))
 
   p/IObservationIndex
   (handle-of [_ tool body]
-    (get-in @state [:by-body (d/body-key tool body)])))
+    (get-in @state [:by-body (d/body-key tool body)]))
+
+  p/IObservationJoin
+  (handle-by-id [_ tool-use-id]
+    (when (some? tool-use-id)
+      (get-in @state [:by-id (str tool-use-id)])))
+  (args-of [_ handle]
+    (some-> (get-in @state [:by-handle handle]) d/signature-args)))
 
 (defn make-log
   "A LocalObservationLog. `spill` is (fn [line]) or nil."
