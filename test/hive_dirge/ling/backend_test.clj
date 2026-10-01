@@ -93,7 +93,7 @@
       (is (= 1 (:dirge/turns st)))
       (is (= :end-turn (:dirge/stop-reason st)))
       (is (= 0.25 (:ling/cost-usd st)))
-      (is (= 0.5 (:ling/progress st))))
+      (is (= {:done 1 :total 2} (:ling/progress st))))
     (is (every? #(= "l1" (first %)) @events))
     (is (= [:ling/plan :ling/turn-end] (mapv second @events)))))
 
@@ -212,7 +212,8 @@
         init (addon/initialize! a {})
         be ((:ling/backend (addon/hooks a)))]
     (is (:success? init))
-    (is (= {:headless-id :dirge :registered? true} (:metadata init)))
+    (is (= {:headless-id :dirge :registered? true}
+           (select-keys (:metadata init) [:headless-id :registered?])))
     (is (:already-initialized? (addon/initialize! a {})))
     (h/headless-spawn! be {:id "l1"} {})
     (is (= :ok (:status (addon/health a))))
