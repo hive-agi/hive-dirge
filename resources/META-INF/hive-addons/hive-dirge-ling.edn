@@ -1,0 +1,15 @@
+{:addon/id           "hive.dirge.ling"
+ :addon/kind         :addon
+ :addon/type         :native
+ :addon/version      "0.1.0"
+ :addon/init-ns      "hive-dirge.ling.addon"
+ :addon/init-fn      "addon-ctor"
+ :addon/config       {}
+ :addon/capabilities #{:headless-backend :health-reporting}
+ :addon/dependencies #{}
+ :addon/headless-backend {:registers-as #{:dirge}
+                          :provides     #{:dirge}
+                          :primary-key  :dirge}
+ :addon/description  "dirge as a hive ling: each headless :dirge ling is a `dirge --acp` subprocess driven over ACP (hive-dirge.ling.acp). Registers the :dirge backend with the host's headless registry at initialize!, resolved at runtime; the binary is $DIRGE_BIN, else dirge on PATH."
+ :addon/maturity     :experimental
+ :addon/trust-class  :foss}
