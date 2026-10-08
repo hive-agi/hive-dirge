@@ -576,13 +576,36 @@
   (boolean (resolve 'hive-vessel.executor.sse/client-features)))
 
 (def feature-panel
-  "A lens-style show-panel: title, plain rows, dirge chords and a cursor."
+  "A lens-style show-panel: title, plain rows, dirge chords and a cursor.
+   Its doc has no blocks (the lens rows carry the list), so the wire lines
+   are exactly title + rows."
   {:op :ui/show-panel
    :panel/id "kanban"
-   :doc {:doc/title "Kanban" :doc/blocks [{:block/type :para :text "No active tasks"}]}
+   :doc {:doc/title "Kanban" :doc/blocks []}
    :panel/rows [{:text "task-42" :face :row :id "task-42" :payload {:task 42}}]
    :keys {"enter" {"invoke" "open"}}
    :cursor true})
+
+(deftest lens-rows-keep-doc-blocks
+  (let [op (assoc-in feature-panel [:doc :doc/blocks]
+                     [{:block/type :para :text "3 callers, 2 callees"}])]
+    (doseq [features [#{} #{:spans}]]
+      (let [lines (get (host/panel-message features op) "lines")
+            ids   (mapv #(get % "id") lines)]
+        (testing (str "features " features)
+          (is (= "Kanban" (or (get-in lines [0 "text"])
+                              (get-in lines [0 "spans" 0 "text"])))
+              "the doc title still heads the panel")
+          (is (some #(= "3 callers, 2 callees"
+                        (or (get % "text") (apply str (map (fn [s] (get s "text")) (get % "spans")))))
+                    lines)
+              "the doc block is rendered, not dropped by the rows")
+          (is (= "task-42" (peek ids)) "the cursor rows follow the blocks")
+          (is (= {"task" 42} (get (peek lines) "payload")))
+          (is (= 1 (count (filter #{"task-42"} ids))) "each row appears once")))))
+  (testing "compose-lines is the identity without rows"
+    (is (= [{"text" "T"}] (host/compose-lines [{"text" "T"}] nil)))
+    (is (= [{"text" "T"} {"id" "r"}] (host/compose-lines [{"text" "T"}] [{"id" "r"}])))))
 
 (deftest mounted-kanban-lens-wire
   (reset! lens-calls [])
