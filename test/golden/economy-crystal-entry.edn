@@ -1,0 +1,12 @@
+{:bare
+ {:type "note",
+  :content "## Digest",
+  :tags ["economy-digest"],
+  :duration "medium"},
+ :blank nil,
+ :full
+ {:type "note",
+  :content "## Digest\n- done",
+  :tags ["economy-digest" "session:s1" "epoch:2"],
+  :duration "medium",
+  :directory "/p/x"}}
