@@ -3,13 +3,13 @@
 
         ;; IAddon contract (leaf lib). hive-dirge depends on the contract,
         ;; never on a host: no hive-mcp.* anywhere.
-        io.github.hive-agi/hive-addon {:mvn/version "1.1.2"}
+        io.github.hive-agi/hive-addon {:mvn/version "1.1.3"}
 
         ;; Result monad / rescue DSL, same pin as hive-addon.
-        io.github.hive-agi/hive-dsl {:mvn/version "0.5.34"}
+        io.github.hive-agi/hive-dsl {:mvn/version "0.5.36"}
 
         ;; hive.dirge.host: the :json dialect, registry and SSE executor.
-        io.github.hive-agi/hive-vessel {:mvn/version "0.1.16"}
+        io.github.hive-agi/hive-vessel {:mvn/version "0.1.17"}
 
         ;; hive.olympus.dirge: the manifest's init-ns is hive-olympus.harness.
         io.github.hive-agi/hive-olympus {:mvn/version "0.1.12"}
