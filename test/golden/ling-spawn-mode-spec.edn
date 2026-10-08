@@ -1,0 +1,42 @@
+{:empty
+ {:description "dirge over ACP on stdio (hive.dirge.ling addon)",
+  :requires-emacs? false,
+  :io-model :stdin-stdout,
+  :slot-limit nil,
+  :mcp? true,
+  :alias-of nil,
+  :capabilities
+  #{:cost-tracking
+    :kill
+    :cap/interrupts
+    :cap/streaming
+    :cap/multi-turn
+    :dispatch}},
+ :priority
+ {:description "dirge over ACP on stdio (hive.dirge.ling addon)",
+  :requires-emacs? false,
+  :io-model :stdin-stdout,
+  :slot-limit nil,
+  :mcp? true,
+  :alias-of nil,
+  :capabilities
+  #{:cost-tracking
+    :kill
+    :cap/interrupts
+    :cap/streaming
+    :cap/multi-turn
+    :dispatch}},
+ :slot-limit
+ {:description "dirge over ACP on stdio (hive.dirge.ling addon)",
+  :requires-emacs? false,
+  :io-model :stdin-stdout,
+  :slot-limit 4,
+  :mcp? true,
+  :alias-of nil,
+  :capabilities
+  #{:cost-tracking
+    :kill
+    :cap/interrupts
+    :cap/streaming
+    :cap/multi-turn
+    :dispatch}}}

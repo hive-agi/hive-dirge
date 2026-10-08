@@ -30,11 +30,28 @@
 
 (def host-update-slave 'hive-mcp.swarm.registry/update-slave!)
 
+(def host-register-mode 'hive-spi.swarm.spawn-modes/register-mode!)
+
+(def host-deregister-mode 'hive-spi.swarm.spawn-modes/deregister-mode!)
+
 (defn registry-meta
   "Registry metadata for CONFIG."
   [config]
   {:provides #{backend/backend-id}
    :priority (or (:ling/priority config) default-priority)})
+
+(defn spawn-mode-spec
+  "Spawn-mode registry entry for :dirge under CONFIG: a headless subprocess
+   mode, visible on the MCP spawn_mode enum, carrying the backend's
+   capabilities. PURE."
+  [config]
+  {:description     "dirge over ACP on stdio (hive.dirge.ling addon)"
+   :requires-emacs? false
+   :io-model        :stdin-stdout
+   :slot-limit      (:ling/slot-limit config)
+   :mcp?            true
+   :alias-of        nil
+   :capabilities    (into #{:dispatch :kill :cost-tracking} backend/capabilities)})
 
 (defn- soft-resolve
   "The var named by SYM, or nil when its namespace is not on the classpath."
@@ -56,6 +73,23 @@
 
 (defn- deregister-backend! [config]
   (when-let [deregister! (or (:ling/deregister! config) (soft-resolve host-deregister))]
+    (try (deregister! backend/backend-id)
+         (catch Throwable t
+           (ex-message t)))))
+
+(defn- register-mode!
+  "Registers :dirge as a spawn mode; true when a registry took it."
+  [config]
+  (when-let [register! (or (:ling/register-mode! config) (soft-resolve host-register-mode))]
+    (try (register! backend/backend-id (spawn-mode-spec config))
+         true
+         (catch Throwable t
+           (binding [*out* *err*]
+             (println "hive.dirge.ling: could not register the spawn mode -" (ex-message t)))
+           false))))
+
+(defn- deregister-mode! [config]
+  (when-let [deregister! (or (:ling/deregister-mode! config) (soft-resolve host-deregister-mode))]
     (try (deregister! backend/backend-id)
          (catch Throwable t
            (ex-message t)))))
@@ -84,20 +118,23 @@
                                       :defaults (:ling/session-defaults config)
                                       :on-event (compose-on-event sink (:ling/on-event config))})
             outcome (register-backend! config b)
-            registered? (boolean (:registered? outcome))]
+            registered? (boolean (:registered? outcome))
+            mode? (boolean (when registered? (register-mode! config)))]
         (reset! state {:lifecycle :active :backend b :progress sink :config config
-                       :registered? registered? :registration outcome})
+                       :registered? registered? :registration outcome
+                       :spawn-mode? mode?})
         {:success? true
          :errors []
          :metadata {:headless-id backend/backend-id :registered? registered?
-                    :progress? (some? sink)}}))))
+                    :spawn-mode? mode? :progress? (some? sink)}}))))
 
 (defn- stop! [state]
   (locking state
-    (let [{:keys [lifecycle backend progress config registered?]} @state]
+    (let [{:keys [lifecycle backend progress config registered? spawn-mode?]} @state]
       (when (= :active lifecycle)
         (backend/close-all! backend)
         (some-> progress progress/close!)
+        (when spawn-mode? (deregister-mode! config))
         (when registered? (deregister-backend! config)))
       (reset! state {:lifecycle :stopped})
       nil)))
