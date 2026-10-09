@@ -18,8 +18,9 @@ addon also exposes `:dirge/register-lenses!` to overlay lenses at runtime;
 no other addon has to edit hive-dirge core. For a mount-time contribution,
 provide `:dirge/lenses` in the addon manifest capabilities so the host mounts
 after it. The discovery doc publishes capabilities v1 with replies, derived
-invokes and key hints; each panel's keys remain authoritative when chords
-collide across lenses. The five Olympus reply actions are unchanged.
+invokes and key hints keyed by panel id (`{"kanban" {"enter" ...} "carto"
+{"enter" ...}}`), so a chord two lenses bind differently is never collapsed
+into one lens's verb; each panel's own keys remain authoritative. The five Olympus reply actions are unchanged.
 
 An addon that presents into dirge through `hive.dirge.host` (rather than as a
 lens of `hive.dirge`) owns its panel from the outside: the host's hooks
