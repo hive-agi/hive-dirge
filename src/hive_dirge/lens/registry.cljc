@@ -188,14 +188,26 @@
                  (reduce-kv (fn [m chord binding]
                               (if (contains? m chord) m (assoc m chord binding))) acc ks)) {})))
 
+(defn panel-keys
+  "The key chords of every lens that declares any, keyed by its panel id:
+   {\"kanban\" {\"enter\" {\"invoke\" \"open\"}} ...}. Per panel, so a chord two
+   lenses bind differently (enter -> open on kanban, recenter on carto) is
+   never collapsed into one lens's verb."
+  [registry]
+  (->> (list-lenses registry)
+       (filter #(and (string? (:lens/panel %)) (seq (:lens/keys %))))
+       (map (fn [l] [(:lens/panel l) (:lens/keys l)]))
+       (into {})))
+
 (defn capabilities-fragment
   "The pure derivation of the C3 capabilities fragment: {\"invokes\" [...]
-   every lens verb ...], \"keys\" {... every lens chord ...}}. The host
-   merges this into the discovery document's \"capabilities\" map; dirge's
-   local grid actions are not bindable from here."
+   every lens verb ...], \"keys\" {panel-id {... that lens's chords ...}}}.
+   The host merges this into the discovery document's \"capabilities\" map;
+   dirge's local grid actions are not bindable from here. Key hints are per
+   panel (see panel-keys); each show-panel's own :keys stay authoritative."
   [registry]
   {"invokes" (all-verbs registry)
-   "keys"    (merged-keys registry)})
+   "keys"    (panel-keys registry)})
 
 ;; =============================================================================
 ;; Built-in lenses: the kanban and swarm views, ported off the closed

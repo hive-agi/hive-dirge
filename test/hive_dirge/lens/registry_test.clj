@@ -94,14 +94,20 @@
 (deftest capabilities-fragment
   (let [caps (lens/capabilities-fragment registry)]
     (is (= ["focus" "open"] (get caps "invokes")) "every lens verb, sorted")
-    (is (= {"enter" {"invoke" "open"}, "x" "refresh"}
-           (get caps "keys")) "every lens chord merged")
+    (is (= {"tasks" {"enter" {"invoke" "open"}}, "agents" {"x" "refresh"}}
+           (get caps "keys")) "chords are hinted per panel")
     (is (every? string? (get caps "invokes"))))
   (testing "the builtin registry derives kanban and swarm chords"
     (let [caps (lens/capabilities-fragment (lens/builtin-registry))]
       (is (= ["focus" "open"] (get caps "invokes")))
-      (is (= {"enter" {"invoke" "open"}}
+      (is (= {"kanban" {"enter" {"invoke" "open"}}
+              "swarm"  {"enter" {"invoke" "focus"}}}
              (get caps "keys")))))
+  (testing "a chord two lenses bind differently keeps both bindings"
+    (let [reg  (lens/make-registry [sample-a (assoc sample-b :lens/keys {"enter" {"invoke" "focus"}})])
+          keys (get (lens/capabilities-fragment reg) "keys")]
+      (is (= {"invoke" "open"} (get-in keys ["tasks" "enter"])))
+      (is (= {"invoke" "focus"} (get-in keys ["agents" "enter"])))))
   (testing "an empty registry answers empty fragment"
     (is (= {"invokes" [] "keys" {}} (lens/capabilities-fragment (lens/make-registry []))))))
 

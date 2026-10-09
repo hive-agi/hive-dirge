@@ -606,8 +606,11 @@
             dirge-host (mount-port/registered mounted "hive.dirge.host")]
         (is (= 1 (get caps "version")))
         (is (some #{"invoke"} (get caps "replies")))
-        (is (= ["focus" "open"] (get caps "invokes")))
-        (is (= {"invoke" "open"} (get-in caps ["keys" "enter"])))
+        (is (= ["focus" "open" "recenter"] (get caps "invokes")))
+        (is (= {"invoke" "open"} (get-in caps ["keys" "kanban" "enter"]))
+            "key hints are per panel: enter means open on kanban")
+        (is (= {"invoke" "recenter"} (get-in caps ["keys" "carto" "enter"]))
+            "and recenter on carto, never one lens's verb for every panel")
         (is (= "retry: 2000" (next-line q)))
         ((get-in (addon/hooks addon-instance) [:dirge/commands "hive" :handler])
          {:argv ["kanban"] :cwd "/w/proj"})
