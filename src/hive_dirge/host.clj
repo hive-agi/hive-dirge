@@ -88,17 +88,26 @@
 
 (defn- panel-rows [op spans?]
   (when (seq (:panel/rows op))
-    (let [rows (wire/->json-data
-                (into [{:text (get-in op [:doc :doc/title]) :face :title}]
-                      (:panel/rows op)))]
+    (let [rows (wire/->json-data (:panel/rows op))]
       (if spans? rows (mapv plain-row rows)))))
+
+(defn compose-lines
+  "The panel body when a lens carries cursor rows: the doc's rendered lines
+   (title first, then every :doc/blocks block -- tables, trees, the layered
+   DAG) followed by the id-bearing ROWS. A doc without blocks renders to its
+   title alone, so such a panel is exactly title + rows, as before. Block
+   lines carry no row id, so an invoke fired on one posts a null row. Nil or
+   empty ROWS leave DOC-LINES untouched. PURE."
+  [doc-lines rows]
+  (if (seq rows)
+    (into (vec doc-lines) rows)
+    doc-lines))
 
 (defn- panel-lines [op spans?]
   (let [message (dissoc (span-lines-message op (when spans? {:vessel/features #{:spans}}))
                         "keys" "cursor" "panel/rows" "spans")
         rows (panel-rows op spans?)]
-    (cond-> message
-      rows (assoc "lines" rows)
+    (cond-> (update message "lines" compose-lines rows)
       (not spans?) (update "lines" #(mapv plain-row %)))))
 
 (defn panel-message

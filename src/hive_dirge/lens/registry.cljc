@@ -207,7 +207,11 @@
    PULL performs the mcp-call through PORTS. PANEL receives the parsed DATA
    and the raw TEXT and shapes the dirge show op; SUMMARY receives DATA and
    answers the chat text. Both results get the lens's key chords and cursor
-   flag merged in."
+   flag merged in.
+
+   The list lines travel once, as :lens/rows (cursor-addressable, id-bearing);
+   :doc/blocks holds only what is not a row, since the host renders blocks
+   above the rows (hive-dirge.host/compose-lines)."
   [ports config ctx {:keys [pull panel summary lens]}]
   (let [answer (pull ports config ctx)
         text   (domain/answer-body (domain/result-text answer))]
@@ -219,8 +223,7 @@
                    {:doc/title  (:title p)
                     :doc/blocks [{:block/type :code :text (:markdown p)}]}
                    {:doc/title  (:title p)
-                    :doc/blocks (mapv (fn [line] {:block/type :para :text (:text line)})
-                                      (:lines p))
+                    :doc/blocks []
                     :lens/rows (:lines p)})]
         {:fx   [(panel-op lens doc)]
          :text (summary data)}))))
