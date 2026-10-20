@@ -188,14 +188,26 @@
                  (reduce-kv (fn [m chord binding]
                               (if (contains? m chord) m (assoc m chord binding))) acc ks)) {})))
 
+(defn panel-keys
+  "The key chords of every lens that declares any, keyed by its panel id:
+   {\"kanban\" {\"enter\" {\"invoke\" \"open\"}} ...}. Per panel, so a chord two
+   lenses bind differently (enter -> open on kanban, recenter on carto) is
+   never collapsed into one lens's verb."
+  [registry]
+  (->> (list-lenses registry)
+       (filter #(and (string? (:lens/panel %)) (seq (:lens/keys %))))
+       (map (fn [l] [(:lens/panel l) (:lens/keys l)]))
+       (into {})))
+
 (defn capabilities-fragment
   "The pure derivation of the C3 capabilities fragment: {\"invokes\" [...]
-   every lens verb ...], \"keys\" {... every lens chord ...}}. The host
-   merges this into the discovery document's \"capabilities\" map; dirge's
-   local grid actions are not bindable from here."
+   every lens verb ...], \"keys\" {panel-id {... that lens's chords ...}}}.
+   The host merges this into the discovery document's \"capabilities\" map;
+   dirge's local grid actions are not bindable from here. Key hints are per
+   panel (see panel-keys); each show-panel's own :keys stay authoritative."
   [registry]
   {"invokes" (all-verbs registry)
-   "keys"    (merged-keys registry)})
+   "keys"    (panel-keys registry)})
 
 ;; =============================================================================
 ;; Built-in lenses: the kanban and swarm views, ported off the closed
@@ -207,7 +219,11 @@
    PULL performs the mcp-call through PORTS. PANEL receives the parsed DATA
    and the raw TEXT and shapes the dirge show op; SUMMARY receives DATA and
    answers the chat text. Both results get the lens's key chords and cursor
-   flag merged in."
+   flag merged in.
+
+   The list lines travel once, as :lens/rows (cursor-addressable, id-bearing);
+   :doc/blocks holds only what is not a row, since the host renders blocks
+   above the rows (hive-dirge.host/compose-lines)."
   [ports config ctx {:keys [pull panel summary lens]}]
   (let [answer (pull ports config ctx)
         text   (domain/answer-body (domain/result-text answer))]
@@ -219,8 +235,7 @@
                    {:doc/title  (:title p)
                     :doc/blocks [{:block/type :code :text (:markdown p)}]}
                    {:doc/title  (:title p)
-                    :doc/blocks (mapv (fn [line] {:block/type :para :text (:text line)})
-                                      (:lines p))
+                    :doc/blocks []
                     :lens/rows (:lines p)})]
         {:fx   [(panel-op lens doc)]
          :text (summary data)}))))

@@ -281,17 +281,14 @@
 (defn- remember-tool [order id]
   (if (some #{id} order) order (conj order id)))
 
-(def terminal-tool-statuses #{:completed :failed})
-
 (defn resolve-tool-id
-  "The tool a tool-update with TOOL-ID refers to in SUMMARY: TOOL-ID itself
-   when non-blank, else the most recent tool call not yet terminal (dirge
-   1.0.4 sends completions with an empty id), else nil."
-  [summary tool-id]
-  (if (and (string? tool-id) (not (str/blank? tool-id)))
-    tool-id
-    (->> (rseq (:tool-order summary))
-         (some #(when-not (terminal-tool-statuses (get-in summary [:tools % :status])) %)))))
+  "The tool a tool-update with TOOL-ID refers to: TOOL-ID itself when it is a
+   non-blank string, else nil. dirge 1.0.4 sent completions with an empty id;
+   BuddhiLW/dirge#27 keeps the real id, so a blank id is no longer guessed
+   onto the most recent open call and the update is dropped instead."
+  [tool-id]
+  (when (and (string? tool-id) (not (str/blank? tool-id)))
+    tool-id))
 
 (defmulti step
   "SUMMARY after EVENT."
@@ -307,7 +304,7 @@
       (assoc :status :running)))
 
 (defmethod step :ling/tool-update [s {:keys [tool-id] :as e}]
-  (if-let [id (resolve-tool-id s tool-id)]
+  (if-let [id (resolve-tool-id tool-id)]
     (-> s
         (update :tools update id merge
                 (assoc (select-keys e [:title :kind :status :output]) :tool-id id))

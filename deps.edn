@@ -3,13 +3,13 @@
 
         ;; IAddon contract (leaf lib). hive-dirge depends on the contract,
         ;; never on a host: no hive-mcp.* anywhere.
-        io.github.hive-agi/hive-addon {:mvn/version "1.1.3"}
+        io.github.hive-agi/hive-addon {:mvn/version "1.1.8"}
 
         ;; Result monad / rescue DSL, same pin as hive-addon.
-        io.github.hive-agi/hive-dsl {:mvn/version "0.5.36"}
+        io.github.hive-agi/hive-dsl {:mvn/version "0.5.37"}
 
         ;; hive.dirge.host: the :json dialect, registry and SSE executor.
-        io.github.hive-agi/hive-vessel {:mvn/version "0.1.17"}
+        io.github.hive-agi/hive-vessel {:mvn/version "0.1.18"}
 
         ;; hive.olympus.dirge: the manifest's init-ns is hive-olympus.harness.
         io.github.hive-agi/hive-olympus {:mvn/version "0.1.12"}
@@ -27,7 +27,8 @@
   :test {:extra-paths ["test"]
          :extra-deps  {io.github.cognitect-labs/test-runner
                        {:git/tag "v0.5.1" :git/sha "dfb30dd"}
-                       org.clojure/test.check {:mvn/version "1.1.3"}}
+                       org.clojure/test.check {:mvn/version "1.1.3"}
+                       io.github.hive-agi/hive-test {:mvn/version "0.5.0"}}
          :main-opts ["-m" "cognitect.test-runner"]
          :exec-fn cognitect.test-runner.api/test
          :jvm-opts ["-Xmx1g"]}
