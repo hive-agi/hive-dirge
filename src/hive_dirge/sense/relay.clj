@@ -110,14 +110,40 @@
       (swap! state update :acked (fnil inc 0))
       true)))
 
+(defn- load-held
+  "The pending set PENDING-STORE saved, normalized; empty without a store or
+   when the store cannot be read."
+  [pending-store]
+  (if pending-store
+    (domain/restore (try (ports/load-pending pending-store)
+                         (catch Throwable _unreadable-store-starts-empty nil)))
+    domain/empty-pending))
+
+(defn- persist-pending!
+  "Save the held set to the relay's store whenever it changes. The save reads
+   the CURRENT set under a lock, so two threads changing it (a pump and an ack)
+   cannot leave the older set as the last one written."
+  [{:keys [pending-store state]}]
+  (when pending-store
+    (add-watch state ::persist
+               (fn [_ _ old new]
+                 (when (not= (:pending old) (:pending new))
+                   (locking pending-store
+                     (try (ports/save-pending! pending-store (:pending @state))
+                          (catch Throwable _counted-in-status
+                            (swap! state update :save-failed (fnil inc 0))))))))))
+
 (defn start!
   "A running relay (see ns doc for OPTS). Registers the sixth-sense
-   listener and schedules a first pump for a backlog."
-  [{:keys [source policy] :as opts}]
+   listener and schedules a first pump for a backlog. With a :pending-store
+   the held set is seeded from it (normalized) and saved on every change."
+  [{:keys [source policy pending-store] :as opts}]
   (let [relay (assoc opts
                      :policy (or policy domain/default-policy)
-                     :state (atom {:pending domain/empty-pending :sent 0 :acked 0 :ignored 0})
+                     :state (atom {:pending (load-held pending-store)
+                                   :sent 0 :acked 0 :ignored 0 :save-failed 0})
                      :pool (Executors/newSingleThreadExecutor (relay-thread)))]
+    (persist-pending! relay)
     (when source
       (ports/listen! source listener-key (fn [_sense] (wake! relay)))
       (wake! relay))
@@ -132,9 +158,11 @@
   nil)
 
 (defn status
-  "What health may show about RELAY."
-  [{:keys [source state]}]
-  (let [{:keys [pending sent acked ignored]} @state]
-    {:senses (if source :listening :absent)
-     :pending (count (:order pending))
-     :sent sent :acked acked :ignored ignored}))
+  "What health may show about RELAY. A relay with a pending store also
+   reports :durable? true and how many saves failed."
+  [{:keys [source state pending-store]}]
+  (let [{:keys [pending sent acked ignored save-failed]} @state]
+    (cond-> {:senses (if source :listening :absent)
+             :pending (count (:order pending))
+             :sent sent :acked acked :ignored ignored}
+      pending-store (assoc :durable? true :save-failed (or save-failed 0)))))

@@ -51,7 +51,8 @@
             [hive-dirge.sense.relay :as relay]
             [hive-vessel.core :as v]
             [hive-vessel.dialect.json :as json]
-            [hive-vessel.wire :as wire]))
+            [hive-vessel.wire :as wire]
+            [hive-dirge.sense.pending-edn :as pending-edn]))
 
 ;; SPDX-License-Identifier: MIT
 
@@ -198,6 +199,19 @@
           (when (:reply/error outcome) (record! state outcome))
           (domain/reply-status outcome))))))
 
+(defn- sense-pending-store
+  "Where the relay keeps unacked ops across a restart.
+   :dirge/sense-pending-store names a store outright (nil or false: memory
+   only); :dirge/sense-pending-path an EDN file. Otherwise the real
+   sixth-sense gets the EDN file at its default path, and an overridden
+   :dirge/sense-source (a test) stays in memory."
+  [config]
+  (cond
+    (contains? config :dirge/sense-pending-store) (or (:dirge/sense-pending-store config) nil)
+    (:dirge/sense-pending-path config) (pending-edn/edn-pending-store (:dirge/sense-pending-path config))
+    (contains? config :dirge/sense-source) nil
+    :else (pending-edn/edn-pending-store)))
+
 (defn- start-relay
   "The sense relay over BRIDGE, or nil when :dirge/senses? is false.
    :dirge/sense-source overrides the sixth-sense adapter (tests)."
@@ -209,7 +223,8 @@
                    :broadcast! (fn [op] (boundary/broadcast! bridge op))
                    :loop-client? (fn [] (contains? (boundary/client-features bridge) sense/feature))
                    :policy (sense/->policy (:dirge/sense-policy config))
-                   :receptor (:dirge/sense-receptor config)})))
+                   :receptor (:dirge/sense-receptor config)
+                   :pending-store (sense-pending-store config)})))
 
 (defn- panel-verb-fn
   "The invoke router's VERB-FN over the panel verbs other addons registered

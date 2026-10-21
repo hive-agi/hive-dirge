@@ -1,0 +1,18 @@
+{:absent {:order [], :ops {}},
+ :dup-order
+ {:order ["a"],
+  :ops {"a" {"op" "loop/steer", "id" "a", "text" "text of a"}}},
+ :empty-map {:order [], :ops {}},
+ :garbage {:order [], :ops {}},
+ :held
+ {:order ["a" "b"],
+  :ops
+  {"a" {"op" "loop/steer", "id" "a", "text" "text of a"},
+   "b" {"op" "loop/steer", "id" "b", "text" "text of b"}}},
+ :orphan-op
+ {:order ["a"],
+  :ops {"a" {"op" "loop/steer", "id" "a", "text" "text of a"}}},
+ :orphan-order
+ {:order ["a"],
+  :ops {"a" {"op" "loop/steer", "id" "a", "text" "text of a"}}},
+ :wrong-id {:order [], :ops {}}}

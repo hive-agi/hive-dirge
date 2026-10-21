@@ -161,6 +161,22 @@
   [{:keys [order ops]}]
   (mapv ops order))
 
+(defn restore
+  "A well-formed pending set from whatever a store handed back. Garbage is
+   empty-pending; otherwise the ops are re-held in their saved order, so an id
+   with no op, an op with no id in the order, an op whose \"id\" disagrees
+   with its key, and duplicates are dropped, and the cap applies again."
+  [loaded]
+  (let [{:keys [order ops]} (when (map? loaded) loaded)]
+    (if (and (sequential? order) (map? ops))
+      (transduce (comp (distinct)
+                       (keep (fn [id] (let [op (get ops id)]
+                                        (when (and (map? op) (= id (get op "id"))) op)))))
+                 (completing hold)
+                 empty-pending
+                 order)
+      empty-pending)))
+
 ;; =============================================================================
 ;; Reply wire
 ;; =============================================================================
