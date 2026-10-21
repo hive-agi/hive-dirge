@@ -55,7 +55,8 @@
     (is (= 1 (:turns s)))
     (is (= :idle (:status s)))
     (is (= "done" (:text s)))
-    (testing "an empty-id completion lands on the open call"
+    (testing "the completion carries the call's real id (BuddhiLW/dirge#27)"
+      (is (= "ba42f537-d753-463d-9264-7abe92ad1090" tool-id))
       (is (= [tool-id] (:tool-order s)))
       (is (not (contains? (:tools s) "")))
       (is (= :completed (get-in s [:tools tool-id :status])))
@@ -167,6 +168,18 @@
                   {:event :ling/tool-update :tool-id "" :status :completed :output "x"})]
     (is (= ["a"] (:tool-order s)))
     (is (nil? (get-in s [:tools "a" :output])))))
+
+(deftest blank-id-update-is-not-guessed-onto-an-open-call
+  (let [open (d/summarize [{:event :ling/tool-call :tool-id "a" :status :pending}])]
+    (doseq [blank ["" "  " nil]]
+      (let [s (d/step open {:event :ling/tool-update :tool-id blank :status :completed :output "x"})]
+        (is (= ["a"] (:tool-order s)))
+        (is (= :pending (get-in s [:tools "a" :status])))
+        (is (nil? (get-in s [:tools "a" :output])))))
+    (testing "the real id still lands"
+      (let [s (d/step open {:event :ling/tool-update :tool-id "a" :status :completed :output "x"})]
+        (is (= :completed (get-in s [:tools "a" :status])))
+        (is (= "x" (get-in s [:tools "a" :output])))))))
 
 (deftest permission-replies
   (let [params {"options" [{"optionId" "y" "kind" "allow_once"}

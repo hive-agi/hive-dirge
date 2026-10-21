@@ -11,8 +11,11 @@
   (:require [hive-addon.protocol :as p]
             [hive-dirge.harness :as h]
             [hive-dirge.hive.domain :as d]
+            [hive-dirge.lens.carto :as carto]
             [hive-dirge.lens.registry :as lens]
             [hive-dirge.live :as live]))
+
+(declare default-registry)
 
 (def addon-id-str "hive.dirge")
 
@@ -93,9 +96,10 @@
 
 (defn run-command
   "Handles one /hive invocation against `ports` and the lens REGISTRY
-   (default: the built-in lenses). Answers a dirge command reply {:text ..}
-   or {:text .. :prompt ..}."
-  ([ports config ctx] (run-command (lens/builtin-registry) ports config ctx))
+   (default: default-registry, the same lenses make-addon mounts, so
+   /hive carto resolves without an addon instance). Answers a dirge command
+   reply {:text ..} or {:text .. :prompt ..}."
+  ([ports config ctx] (run-command (default-registry) ports config ctx))
   ([registry ports config ctx]
    (let [{:keys [action reason query message panel verb row]}
          (d/parse-command ctx)]
@@ -199,16 +203,19 @@
           false))))
 
 (defn hook-map
-  "The addon's hooks, built per call so a refresh sees REPL redefinitions."
+  "The addon's hooks, built per call so a refresh sees REPL redefinitions.
+   Commands and invokes see the ports plus :config, a zero-arg fn answering
+   the resolved addon config, so lens verbs (which get no config argument)
+   still honour a configured :hive/server."
   [{:keys [state ports registry]}]
-  (let [ports (live/ports ports)
-        cfg   #(current-config state)]
+  (let [cfg   #(current-config state)
+        ports (assoc (live/ports ports) :config cfg)]
     (live/hooks-with
      addon-id-str
      {:dirge/system-prompt    (fn [_] (d/system-prompt (cfg)))
       :dirge/session-start    (fn [ctx] (session-start ports (cfg) ctx))
       :dirge/session-end      (fn [ctx] (session-end ports (cfg) ctx))
-      :dirge/commands         {"hive" {:description "hive: catchup | wrap | kanban [status] | swarm [scope] | lens [name] | memory <query> | shout <message>"
+      :dirge/commands         {"hive" {:description "hive: catchup | wrap | kanban [status] | swarm [scope] | carto <qn> | lens [name] | memory <query> | shout <message>"
                                        :handler     (fn [ctx] (run-command registry ports (cfg) ctx))}}
       :dirge/lenses           (fn [] (vec (lens/list-lenses registry)))
       :dirge/register-lenses! (fn [lenses]
@@ -238,11 +245,18 @@
   (excluded-tools [_] #{})
   (hooks [this] (hook-map this)))
 
+(defn default-registry
+  "The built-in lenses plus the lenses of this addon's own lens namespaces
+   (carto L1). The registry namespace cannot require them (they require it),
+   so the composition happens here, one layer up."
+  []
+  (lens/with-builtins (lens/builtin-registry) [carto/carto-lens]))
+
 (defn make-addon
-  "An uninitialized addon over `ports`. REGISTRY defaults to the built-in
-   lenses; hosts compose extra lenses with
-   hive-dirge.lens.registry/with-builtins."
-  ([ports] (make-addon ports (lens/builtin-registry)))
+  "An uninitialized addon over `ports`. REGISTRY defaults to
+   default-registry (the built-in lenses plus carto); hosts compose extra
+   lenses with hive-dirge.lens.registry/with-builtins."
+  ([ports] (make-addon ports (default-registry)))
   ([ports registry]
    (let [live (atom registry)]
      (->HiveDirgeAddon (atom {:config nil :initialized? false :lens-registry live})

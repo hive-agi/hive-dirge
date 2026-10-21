@@ -51,7 +51,8 @@
             [hive-dirge.sense.relay :as relay]
             [hive-vessel.core :as v]
             [hive-vessel.dialect.json :as json]
-            [hive-vessel.wire :as wire]))
+            [hive-vessel.wire :as wire]
+            [hive-dirge.sense.pending-edn :as pending-edn]))
 
 ;; SPDX-License-Identifier: MIT
 
@@ -88,17 +89,26 @@
 
 (defn- panel-rows [op spans?]
   (when (seq (:panel/rows op))
-    (let [rows (wire/->json-data
-                (into [{:text (get-in op [:doc :doc/title]) :face :title}]
-                      (:panel/rows op)))]
+    (let [rows (wire/->json-data (:panel/rows op))]
       (if spans? rows (mapv plain-row rows)))))
+
+(defn compose-lines
+  "The panel body when a lens carries cursor rows: the doc's rendered lines
+   (title first, then every :doc/blocks block -- tables, trees, the layered
+   DAG) followed by the id-bearing ROWS. A doc without blocks renders to its
+   title alone, so such a panel is exactly title + rows, as before. Block
+   lines carry no row id, so an invoke fired on one posts a null row. Nil or
+   empty ROWS leave DOC-LINES untouched. PURE."
+  [doc-lines rows]
+  (if (seq rows)
+    (into (vec doc-lines) rows)
+    doc-lines))
 
 (defn- panel-lines [op spans?]
   (let [message (dissoc (span-lines-message op (when spans? {:vessel/features #{:spans}}))
                         "keys" "cursor" "panel/rows" "spans")
         rows (panel-rows op spans?)]
-    (cond-> message
-      rows (assoc "lines" rows)
+    (cond-> (update message "lines" compose-lines rows)
       (not spans?) (update "lines" #(mapv plain-row %)))))
 
 (defn panel-message
@@ -189,6 +199,19 @@
           (when (:reply/error outcome) (record! state outcome))
           (domain/reply-status outcome))))))
 
+(defn- sense-pending-store
+  "Where the relay keeps unacked ops across a restart.
+   :dirge/sense-pending-store names a store outright (nil or false: memory
+   only); :dirge/sense-pending-path an EDN file. Otherwise the real
+   sixth-sense gets the EDN file at its default path, and an overridden
+   :dirge/sense-source (a test) stays in memory."
+  [config]
+  (cond
+    (contains? config :dirge/sense-pending-store) (or (:dirge/sense-pending-store config) nil)
+    (:dirge/sense-pending-path config) (pending-edn/edn-pending-store (:dirge/sense-pending-path config))
+    (contains? config :dirge/sense-source) nil
+    :else (pending-edn/edn-pending-store)))
+
 (defn- start-relay
   "The sense relay over BRIDGE, or nil when :dirge/senses? is false.
    :dirge/sense-source overrides the sixth-sense adapter (tests)."
@@ -200,7 +223,8 @@
                    :broadcast! (fn [op] (boundary/broadcast! bridge op))
                    :loop-client? (fn [] (contains? (boundary/client-features bridge) sense/feature))
                    :policy (sense/->policy (:dirge/sense-policy config))
-                   :receptor (:dirge/sense-receptor config)})))
+                   :receptor (:dirge/sense-receptor config)
+                   :pending-store (sense-pending-store config)})))
 
 (defn- panel-verb-fn
   "The invoke router's VERB-FN over the panel verbs other addons registered

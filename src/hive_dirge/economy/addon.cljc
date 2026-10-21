@@ -3,8 +3,10 @@
    it back through the context_retrieve tool, and answers dirge's compact hook
    with a structured, citing Digest. Wiring only."
   (:require [hive-addon.protocol :as p]
+            [hive-dirge.economy.adapters.hive-memory :as hive-memory]
             [hive-dirge.economy.adapters.local :as local]
             [hive-dirge.economy.pipeline.compact :as compact]
+            [hive-dirge.economy.pipeline.crystallize :as crystallize]
             [hive-dirge.economy.pipeline.retrieve :as retrieve]
             [hive-dirge.economy.registry :as registry]
             [hive-dirge.harness :as h]
@@ -15,7 +17,9 @@
 (def addon-id-str "hive.dirge.economy")
 
 (def harness-ports
-  {:cwd h/cwd})
+  {:cwd        h/cwd
+   :mcp-call   h/mcp-call
+   :json-parse h/json-parse})
 
 (defn- session-path
   [ports state]
@@ -36,14 +40,24 @@
    :digests (atom {})
    :pending (atom {})})
 
+(defn crystallizer
+  "The ICrystallizer over hive memory, built from the live ports; nil
+   outside dirge (no :mcp-call port)."
+  [ports state]
+  (let [p (live/ports ports)]
+    (hive-memory/make-crystallizer {:server     (:hive/server (:config @state))
+                                    :mcp-call   (:mcp-call p)
+                                    :json-parse (:json-parse p)})))
+
 (defn compact-env
-  "`env` plus the Digestor the addon config selects (registry, OCP) and the
-   optional :now clock port."
+  "`env` plus the Digestor the addon config selects (registry, OCP), the
+   optional :now clock port and the crystallizer."
   [env ports state]
   (let [config (:config @state)]
     (assoc env
            :config config
            :digestor (registry/select :digestor config)
+           :crystallizer (crystallizer ports state)
            :now (:now (live/ports ports)))))
 
 (def retrieve-tool-schema
@@ -62,11 +76,13 @@
     :handler     (fn [params] (retrieve/tool-answer (retrieve/retrieve env params)))}])
 
 (defn- session-start
-  [state ctx]
+  "Records the session; when :economy/crystallize? is on, answers
+   {:context text} seeded from the project's newest Digests."
+  [env ports state ctx]
   (swap! state assoc
          :session-id (or (:session-id ctx) (:session-id @state))
          :cwd (or (:cwd ctx) (:cwd @state)))
-  nil)
+  (crystallize/seed (compact-env env ports state) (:cwd @state)))
 
 (defn tool-list
   "The addon's tools, built per call so a refresh sees REPL redefinitions."
@@ -82,16 +98,21 @@
 (defn hook-map
   "The addon's hooks, built per call so a refresh sees REPL redefinitions.
    Tool results, turns, usage and compactions are watched on :dirge/event.
+   A Digest the compact hook answers is crystallized when enabled.
    :dirge/transform-context is listened on only while a shaper is selected,
    so dirge installs no per-call hook when masking is off."
   [{:keys [state ports env]}]
   (let [shaper (shaper-of state)]
     (live/hooks-with
      addon-id-str
-     (cond-> {:dirge/session-start  (fn [ctx] (session-start state ctx))
+     (cond-> {:dirge/session-start  (fn [ctx] (session-start env ports state ctx))
               :dirge/event          (fn [ctx] (watch/on-event env ctx))
               :dirge/before-compact (fn [ctx] (compact/before-compact env ctx))
-              :dirge/compact        (fn [ctx] (compact/compact (compact-env env ports state) ctx))}
+              :dirge/compact        (fn [ctx]
+                                      (let [cenv (compact-env env ports state)
+                                            ctx' (update ctx :cwd #(or % (:cwd @state)))]
+                                        (crystallize/after-compact! cenv ctx'
+                                                                    (compact/compact cenv ctx))))}
        shaper (assoc :dirge/transform-context
                      (fn [ctx] (shape/transform-context (assoc env :shaper shaper) ctx)))))))
 
