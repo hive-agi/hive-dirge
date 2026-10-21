@@ -11,7 +11,8 @@
             [hive-dirge.economy.registry :as registry]
             [hive-dirge.harness :as h]
             [hive-dirge.economy.pipeline.watch :as watch]
-            [hive-dirge.live :as live]))
+            [hive-dirge.live :as live]
+            [hive-dirge.economy.pipeline.shape :as shape]))
 
 (def addon-id-str "hive.dirge.economy")
 
@@ -88,21 +89,32 @@
   [{:keys [env]}]
   (live/tools-with addon-id-str (tool-defs env)))
 
+(defn shaper-of
+  "The IContextShaper the addon config selects (registry, OCP), or nil when
+   none is on (:economy/mask-after-turns unset: the default)."
+  [state]
+  (registry/select :shaper (:config @state)))
+
 (defn hook-map
   "The addon's hooks, built per call so a refresh sees REPL redefinitions.
    Tool results, turns, usage and compactions are watched on :dirge/event.
-   A Digest the compact hook answers is crystallized when enabled."
+   A Digest the compact hook answers is crystallized when enabled.
+   :dirge/transform-context is listened on only while a shaper is selected,
+   so dirge installs no per-call hook when masking is off."
   [{:keys [state ports env]}]
-  (live/hooks-with
-   addon-id-str
-   {:dirge/session-start  (fn [ctx] (session-start env ports state ctx))
-    :dirge/event          (fn [ctx] (watch/on-event env ctx))
-    :dirge/before-compact (fn [ctx] (compact/before-compact env ctx))
-    :dirge/compact        (fn [ctx]
-                            (let [cenv (compact-env env ports state)
-                                  ctx' (update ctx :cwd #(or % (:cwd @state)))]
-                              (crystallize/after-compact! cenv ctx'
-                                                          (compact/compact cenv ctx))))}))
+  (let [shaper (shaper-of state)]
+    (live/hooks-with
+     addon-id-str
+     (cond-> {:dirge/session-start  (fn [ctx] (session-start env ports state ctx))
+              :dirge/event          (fn [ctx] (watch/on-event env ctx))
+              :dirge/before-compact (fn [ctx] (compact/before-compact env ctx))
+              :dirge/compact        (fn [ctx]
+                                      (let [cenv (compact-env env ports state)
+                                            ctx' (update ctx :cwd #(or % (:cwd @state)))]
+                                        (crystallize/after-compact! cenv ctx'
+                                                                    (compact/compact cenv ctx))))}
+       shaper (assoc :dirge/transform-context
+                     (fn [ctx] (shape/transform-context (assoc env :shaper shaper) ctx)))))))
 
 (defrecord HiveDirgeEconomyAddon [state ports env]
   p/IAddon

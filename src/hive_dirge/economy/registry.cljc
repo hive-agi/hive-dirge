@@ -3,16 +3,21 @@
    map entry, never a case edit. The addon config picks one per role, e.g.
    {:economy/digestor :structured}; an unknown name falls back to the
    role's default."
-  (:require [hive-dirge.economy.adapters.structured :as structured]))
+  (:require [hive-dirge.economy.adapters.structured :as structured]
+            [hive-dirge.economy.mask :as mask]))
 
 (def strategies
-  {:digestor {:structured structured/make-digestor}})
+  {:digestor {:structured structured/make-digestor}
+   ;; :shaper answers :dirge/transform-context; a ctor may answer nil (off).
+   :shaper   {:mask mask/make-shaper}})
 
 (def defaults
-  {:digestor :structured})
+  {:digestor :structured
+   :shaper   :mask})
 
 (def config-keys
-  {:digestor :economy/digestor})
+  {:digestor :economy/digestor
+   :shaper   :economy/shaper})
 
 (defn- ->kw
   [x]
