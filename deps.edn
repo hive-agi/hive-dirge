@@ -19,10 +19,9 @@
 
  :aliases
  {;; Work against sibling checkouts instead of the released jars.
-  :dev  {:extra-paths ["dev" "test"]
-         :override-deps {io.github.hive-agi/hive-addon   {:local/root "../hive-addon"}
-                         io.github.hive-agi/hive-vessel  {:local/root "../hive-vessel"}
-                         io.github.hive-agi/hive-olympus {:local/root "../hive-olympus"}}}
+  ;; The sibling :local/root overrides live in the gitignored local.deps.edn
+  ;; (see README "Running"), never in this committed file.
+  :dev  {:extra-paths ["dev" "test"]}
 
   :test {:extra-paths ["test"]
          :extra-deps  {io.github.cognitect-labs/test-runner
