@@ -281,6 +281,20 @@ defn and then asking dirge to refresh is enough; no re-initialize is needed.
 ```sh
 clojure -M:test                        # JVM suite (cognitect test-runner)
 clojure -M:dev                         # against the sibling ../hive-addon checkout
+                                       # (needs local.deps.edn, below)
+clojure -Sdeps "$(cat local.deps.edn)" -M:dev:local
+```
+
+The sibling overrides are not committed. Put them in the gitignored
+`local.deps.edn` at the repo root:
+
+```clojure
+{:aliases {:local {:override-deps {io.github.hive-agi/hive-addon   {:local/root "../hive-addon"}
+                                   io.github.hive-agi/hive-vessel  {:local/root "../hive-vessel"}
+                                   io.github.hive-agi/hive-olympus {:local/root "../hive-olympus"}}}}}
+```
+
+```sh
 
 # cljrs smoke: a main.cljc that requires hive-dirge.probe.addon
 cljrs run --src-path src --src-path ../hive-addon/src main.cljc
